@@ -4,6 +4,7 @@ import sqlite3
 import uuid
 import asyncio
 from collections import Counter
+from typing import Optional
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton, 
@@ -22,7 +23,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8839466034:AAF_ONFjOcoOSrcQtiTRrtWlTQJCDtR-C
 
 OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").split(",") if x.strip()]
 
-# ==================== القناة الخاصة (من بوت الخدمات) ====================
 PRIVATE_CHANNEL_ID = "-1003434964850"
 PRIVATE_CHANNEL_LINK = "https://t.me/+91X31VNWIU1iNDM8"
 
@@ -126,9 +126,10 @@ def init_db():
     cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("total_operations", "0")')
     cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("referral_points", "1.0")')
     
-    # إضافة القناة الخاصة تلقائياً
-    cursor.execute("INSERT OR IGNORE INTO channels (channel_id, invite_link) VALUES (?, ?)", 
-                   (PRIVATE_CHANNEL_ID, PRIVATE_CHANNEL_LINK))
+    cursor.execute(
+        "INSERT OR IGNORE INTO channels (channel_id, invite_link) VALUES (?, ?)",
+        (PRIVATE_CHANNEL_ID, PRIVATE_CHANNEL_LINK)
+    )
     
     conn.commit()
     conn.close()
@@ -144,7 +145,6 @@ def get_db():
 def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
-# ==================== تصدير وحفظ ملف الأعضاء ====================
 def save_members_points_to_file():
     try:
         conn = get_db()
@@ -164,7 +164,6 @@ def save_members_points_to_file():
         print(f"[EXPORT ERROR] {e}")
         return 0
 
-# ==================== إدارة النقاط والمهمات ====================
 def get_user_points(user_id: int) -> float:
     conn = get_db()
     cursor = conn.cursor()
@@ -182,7 +181,10 @@ def get_user_points(user_id: int) -> float:
 def add_user_points(user_id: int, points: float):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO users (user_id, points) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET points = points + ?", (user_id, points, points))
+    cursor.execute(
+        "INSERT INTO users (user_id, points) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET points = points + ?",
+        (user_id, points, points)
+    )
     conn.commit()
     conn.close()
     save_members_points_to_file()
@@ -236,11 +238,13 @@ def set_referral_points(points: float):
 def log_search_domain(domain: str):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO search_stats (domain, search_count) VALUES (?, 1) ON CONFLICT(domain) DO UPDATE SET search_count = search_count + 1", (domain.lower(),))
+    cursor.execute(
+        "INSERT INTO search_stats (domain, search_count) VALUES (?, 1) ON CONFLICT(domain) DO UPDATE SET search_count = search_count + 1",
+        (domain.lower(),)
+    )
     conn.commit()
     conn.close()
 
-# ==================== أدوات القنوات (نظام الاشتراك مثل بوت الخدمات) ====================
 def parse_chat_id(ch: str):
     ch = ch.strip()
     if ch.startswith("@") or (not ch.startswith("-") and not ch.lstrip("-").isdigit()):
@@ -264,7 +268,6 @@ def make_fallback_link(ch: str) -> str:
     return f"https://t.me/{ch}"
 
 async def ensure_invite_link(client: Client, channel_id: str, table: str = "channels") -> str:
-    # للقناة الخاصة نرجع الرابط الثابت دائماً
     if channel_id == PRIVATE_CHANNEL_ID:
         return PRIVATE_CHANNEL_LINK
 
@@ -336,7 +339,7 @@ async def check_all_forced(client: Client, user_id: int) -> bool:
             return False
     return True
 
-async def build_forced_markup(client: Client) -> InlineKeyboardMarkup | None:
+async def build_forced_markup(client: Client) -> Optional[InlineKeyboardMarkup]:
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT channel_id FROM channels")
@@ -363,11 +366,14 @@ async def check_sub_cb(client: Client, callback: CallbackQuery):
     ok = await check_all_forced(client, uid)
     if ok:
         await callback.message.edit_text("✅ تم التحقق بنجاح! يمكنك استخدام البوت الآن.")
-        await client.send_message(uid, "أهلاً بك مجدداً في القائمة الرئيسية:", reply_markup=user_keyboard() if not is_owner(uid) else owner_keyboard())
+        await client.send_message(
+            uid,
+            "أهلاً بك مجدداً في القائمة الرئيسية:",
+            reply_markup=user_keyboard() if not is_owner(uid) else owner_keyboard()
+        )
     else:
         await callback.answer("❌ لم تقم بالاشتراك في جميع القنوات المطلوبة بعد.", show_alert=True)
 
-# ==================== معالجة قاعدة البيانات للكومبو ====================
 def count_available_combos(domain: str) -> int:
     conn = get_db()
     cursor = conn.cursor()
@@ -517,7 +523,6 @@ def delete_by_domain(domain: str) -> int:
     conn.close()
     return count
 
-# ==================== لوحات التحكم ====================
 def owner_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("🔍 بحث عن دومين"), KeyboardButton("📤 رفع ملف ULP")],
@@ -537,7 +542,6 @@ def user_keyboard():
         [KeyboardButton("🔗 رابط الإحالة"), KeyboardButton("📺 قنوات الإعلانات")]
     ], resize_keyboard=True)
 
-# ==================== الأوامر العامة والبدء ====================
 @app.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message):
     user_id = message.from_user.id
@@ -609,7 +613,10 @@ async def start_handler(client: Client, message: Message):
             return
         if not await check_all_forced(client, user_id):
             markup = await build_forced_markup(client)
-            await message.reply("⚠️ يجب عليك الاشتراك في قنوات البوت أولاً لاستخدام الخدمة!", reply_markup=markup)
+            await message.reply(
+                "⚠️ يجب عليك الاشتراك في قنوات البوت أولاً لاستخدام الخدمة!",
+                reply_markup=markup
+            )
             return
 
     text = f"""أهلاً بك في <b>بوت الكومبو والخدمات السريعة</b>
@@ -707,7 +714,6 @@ async def check_ad_cb(client: Client, callback: CallbackQuery):
     except Exception:
         pass
 
-# ==================== أوامر المالك ====================
 @app.on_message(filters.regex("^📁 حفظ ملف الأعضاء$") & filters.user(OWNER_IDS))
 async def manual_export_members(client: Client, message: Message):
     total = save_members_points_to_file()
@@ -747,7 +753,10 @@ async def add_ad_cmd(client: Client, message: Message):
     
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO ad_channels (channel_id, points_reward, invite_link) VALUES (?, ?, NULL)", (ch, pts))
+    cursor.execute(
+        "INSERT OR REPLACE INTO ad_channels (channel_id, points_reward, invite_link) VALUES (?, ?, NULL)",
+        (ch, pts)
+    )
     conn.commit()
     conn.close()
     
@@ -984,7 +993,6 @@ async def ask_domain_delete(client: Client, message: Message):
     user_action_state[message.from_user.id] = "awaiting_domain_delete"
     await message.reply("📝 أرسل اسم الدومين الذي تريد حذفه بالكامل:")
 
-# ==================== رفع الملفات ====================
 @app.on_message(filters.regex("^📤 رفع ملف ULP$") & filters.user(OWNER_IDS))
 async def ask_file(client: Client, message: Message):
     await message.reply("📤 أرسل ملفات الـ <b>ULP</b> الآن لمعالجتها وإضافتها للكومبو...")
@@ -1010,7 +1018,6 @@ async def handle_large_document(client: Client, message: Message):
     except Exception as e:
         await message.reply(f"❌ حصل خطأ أثناء رفع الملف:\n<code>{str(e)}</code>")
 
-# ==================== نظام الاستخراج والبحث وتسعير النقاط ====================
 def calculate_dynamic_price(count: int, is_owner_user: bool) -> float:
     if is_owner_user:
         return 0.0
@@ -1028,12 +1035,16 @@ async def ask_domain(client: Client, message: Message):
             return
         if not await check_all_forced(client, user_id):
             markup = await build_forced_markup(client)
-            await message.reply("⚠️ يجب عليك الاشتراك في قنوات البوت أولاً لاستخدام الخدمة!", reply_markup=markup)
+            await message.reply(
+                "⚠️ يجب عليك الاشتراك في قنوات البوت أولاً لاستخدام الخدمة!",
+                reply_markup=markup
+            )
             return
     user_action_state[user_id] = "awaiting_search_domain"
     await message.reply("📝 أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:")
 
-@app.on_message(filters.text & \~filters.command(["start", "bc", "add_ad", "make_gift", "send_pts", "add_channel", "del_channel", "set_ref_points"]))
+@app.on_message(filters.text & ~filters.command(["start", "bc", "add_ad", "make_gift", "send_pts", "add_channel", "del_channel", "set_ref_points"]))
+
 async def process_domain_input(client: Client, message: Message):
     user_id = message.from_user.id
     
@@ -1075,7 +1086,10 @@ async def process_domain_input(client: Client, message: Message):
             return
         if not await check_all_forced(client, user_id):
             markup = await build_forced_markup(client)
-            await message.reply("⚠️ يجب عليك الاشتراك في القنوات الإجبارية لاستخدام البوت.", reply_markup=markup)
+            await message.reply(
+                "⚠️ يجب عليك الاشتراك في القنوات الإجبارية لاستخدام البوت.",
+                reply_markup=markup
+            )
             return
 
     available_count = await asyncio.to_thread(count_available_combos, domain)
@@ -1204,6 +1218,5 @@ async def cancel_pull_cb(client: Client, callback: CallbackQuery):
     await callback.answer()
     await callback.message.edit_text("❌ تم إلغاء العملية بنجاح.")
 
-# ==================== التشغيل ====================
-print("⚡ Bot is starting with updated Force-Sub & Pricing System...")
+print("⚡ Bot is starting...")
 app.run()
