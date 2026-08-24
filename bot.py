@@ -17,7 +17,7 @@ API_HASH = os.getenv("API_HASH", "a860b181d2f15d0473ee309523a9fc19")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8839466034:AAF_ONFjOcoOSrcQtiTRrtWlTQJCDtR-Cxw")
 
 OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").split(",") if x.strip()]
-DB_PATH = os.getenv("DB_PATH", "/data/combos.db")   # مهم لـ Railway Volume
+DB_PATH = os.getenv("DB_PATH", "/data/combos.db")
 bot_enabled_for_users = True
 
 user_action_state = {}
@@ -27,7 +27,7 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workdir="/tmp"          # يمنع مشاكل الكتابة على الملفات المؤقتة
+    workdir="/tmp"
 )
 
 # ==================== إدارة قاعدة البيانات ====================
