@@ -231,6 +231,33 @@ def log_search_domain(domain: str):
     conn.close()
 
 # ==================== فحص الاشتراكات والإعلانات ====================
+async def get_subscription_markup():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_id FROM channels")
+    channels = cursor.fetchall()
+    conn.close()
+    
+    if not channels:
+        return None
+        
+    buttons = []
+    for (ch,) in channels:
+        ch_clean = ch.strip()
+        if ch_clean.startswith("@"):
+            ch_link = f"https://t.me/{ch_clean.replace('@', '')}"
+            btn_text = f"اشتراك في القناة {ch_clean}"
+        elif ch_clean.startswith("-100") or ch_clean.isdigit() or ch_clean.startswith("-"):
+            ch_link = f"https://t.me/c/{str(ch_clean).replace('-100', '')}"
+            btn_text = "اشتراك في القناة 📢"
+        else:
+            ch_link = f"https://t.me/{ch_clean}"
+            btn_text = f"اشتراك في {ch_clean}"
+        buttons.append([InlineKeyboardButton(btn_text, url=ch_link)])
+        
+    buttons.append([InlineKeyboardButton("🔄 تحقق من الاشتراك", callback_data="check_sub")])
+    return InlineKeyboardMarkup(buttons)
+
 async def check_subscription(client: Client, user_id: int) -> bool:
     if is_owner(user_id):
         return True
@@ -240,15 +267,28 @@ async def check_subscription(client: Client, user_id: int) -> bool:
     channels = cursor.fetchall()
     conn.close()
     
+    if not channels:
+        return True
+        
     for (ch,) in channels:
         try:
-            chat_id = int(ch) if (ch.startswith("-") or ch.isdigit()) else ch
+            ch_str = ch.strip()
+            chat_id = int(ch_str) if (ch_str.startswith("-") or ch_str.isdigit()) else ch_str
             member = await client.get_chat_member(chat_id, user_id)
             if member.status in ["kicked", "left"]:
                 return False
         except Exception:
             return False
     return True
+
+@app.on_callback_query(filters.regex("^check_sub$"))
+async def verify_subscription_cb(client: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if await check_subscription(client, user_id):
+        await callback.message.edit_text("✅ شكراً لاشتراكك! يمكنك الآن استخدام البوت بكل سهولة عبر الأزرار أدناه.")
+        await client.send_message(user_id, "أهلاً بك مرة أخرى، اختر ما تحتاجه:", reply_markup=user_keyboard())
+    else:
+        await callback.answer("❌ لم تقم بالاشتراك في جميع القنوات المطلوبة بعد!", show_alert=True)
 
 @app.on_chat_member_updated()
 async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
@@ -527,6 +567,15 @@ async def start_handler(client: Client, message: Message):
 
     conn.close()
 
+    if not is_owner(user_id):
+        if not bot_enabled_for_users:
+            await message.reply("⚠️ البوت حالياً مغلق عن الأعضاء.")
+            return
+        if not await check_subscription(client, user_id):
+            markup = await get_subscription_markup()
+            await message.reply("⚠️ يجب عليك الاشتراك في قنوات البوت أولاً لاستخدام الخدمة!", reply_markup=markup)
+            return
+
     text = f"""اهلا بك في <b>بوت الكومبو والخدمات السريعة</b>
 
 نقاطك الحالية: <b>{get_user_points(user_id)}</b>
@@ -537,12 +586,6 @@ async def start_handler(client: Client, message: Message):
     if is_owner(user_id):
         await message.reply(text, reply_markup=owner_keyboard())
     else:
-        if not bot_enabled_for_users:
-            await message.reply("⚠️ البوت حالياً مغلق عن الأعضاء.")
-            return
-        if not await check_subscription(client, user_id):
-            await message.reply("⚠️ يجب عليك الاشتراك في قنوات البوت أولاً لاستخدام الخدمة!")
-            return
         await message.reply(text, reply_markup=user_keyboard())
 
 @app.on_message(filters.regex("^💰 رصيدي ونقاطي$"))
@@ -899,7 +942,8 @@ async def ask_domain(client: Client, message: Message):
             await message.reply("⚠️ البوت حالياً مغلق عن الأعضاء.")
             return
         if not await check_subscription(client, user_id):
-            await message.reply("⚠️ يجب عليك الاشتراك في القنوات المحددة أولاً للاستخدام.")
+            markup = await get_subscription_markup()
+            await message.reply("⚠️ يجب عليك الاشتراك في القنوات المحددة أولاً للاستخدام.", reply_markup=markup)
             return
     user_action_state[user_id] = "awaiting_search_domain"
     await message.reply("📝 أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:")
@@ -946,7 +990,8 @@ async def process_domain_input(client: Client, message: Message):
             await message.reply("⚠️ البوت حالياً مغلق عن الأعضاء.")
             return
         if not await check_subscription(client, user_id):
-            await message.reply("⚠️ يجب عليك الاشتراك في القنوات الإجبارية لاستخدام البوت.")
+            markup = await get_subscription_markup()
+            await message.reply("⚠️ يجب عليك الاشتراك في القنوات الإجبارية لاستخدام البوت.", reply_markup=markup)
             return
 
     available_count = await asyncio.to_thread(count_available_combos, domain)
@@ -981,7 +1026,16 @@ async def process_domain_input(client: Client, message: Message):
     if row:
         buttons_list.append(row)
 
-    total_price = 0.0 if is_owner_user else float(math.ceil(available_count / 1000))
+    # حساب السعر الجديد بناءً على طلبك (أقل من ألف 0.5، ألف 1، ألفين 2، وهكذا...)
+    def calculate_price(count: int) -> float:
+        if is_owner_user:
+            return 0.0
+        if count < 1000:
+            return 0.5
+        else:
+            return float(count / 1000)
+
+    total_price = calculate_price(available_count)
     buttons_list.append([
         InlineKeyboardButton(
             f"🚀 سحب الكل ({available_count:,} حساب) بـ {total_price} نقطة", 
