@@ -22,6 +22,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8839466034:AAF_ONFjOcoOSrcQtiTRrtWlTQJCDtR-C
 
 OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").split(",") if x.strip()]
 
+# ==================== القناة الخاصة (من بوت الخدمات) ====================
+PRIVATE_CHANNEL_ID = "-1003434964850"
+PRIVATE_CHANNEL_LINK = "https://t.me/+91X31VNWIU1iNDM8"
+
 if os.path.exists("/storage/emulated/0/"):
     BASE_DIR = "/storage/emulated/0/combo-bot"
 else:
@@ -121,6 +125,10 @@ def init_db():
     ''')
     cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("total_operations", "0")')
     cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("referral_points", "1.0")')
+    
+    # إضافة القناة الخاصة تلقائياً
+    cursor.execute("INSERT OR IGNORE INTO channels (channel_id, invite_link) VALUES (?, ?)", 
+                   (PRIVATE_CHANNEL_ID, PRIVATE_CHANNEL_LINK))
     
     conn.commit()
     conn.close()
@@ -232,7 +240,7 @@ def log_search_domain(domain: str):
     conn.commit()
     conn.close()
 
-# ==================== أدوات القنوات والروابط للاشتراك الإجباري ====================
+# ==================== أدوات القنوات (نظام الاشتراك مثل بوت الخدمات) ====================
 def parse_chat_id(ch: str):
     ch = ch.strip()
     if ch.startswith("@") or (not ch.startswith("-") and not ch.lstrip("-").isdigit()):
@@ -241,6 +249,8 @@ def parse_chat_id(ch: str):
 
 def make_fallback_link(ch: str) -> str:
     ch = ch.strip()
+    if ch == PRIVATE_CHANNEL_ID:
+        return PRIVATE_CHANNEL_LINK
     if ch.startswith("@"):
         return f"https://t.me/{ch[1:]}"
     if ch.startswith("-100"):
@@ -254,6 +264,10 @@ def make_fallback_link(ch: str) -> str:
     return f"https://t.me/{ch}"
 
 async def ensure_invite_link(client: Client, channel_id: str, table: str = "channels") -> str:
+    # للقناة الخاصة نرجع الرابط الثابت دائماً
+    if channel_id == PRIVATE_CHANNEL_ID:
+        return PRIVATE_CHANNEL_LINK
+
     conn = get_db()
     c = conn.cursor()
     c.execute(f"SELECT invite_link FROM {table} WHERE channel_id = ?", (channel_id,))
@@ -334,10 +348,13 @@ async def build_forced_markup(client: Client) -> InlineKeyboardMarkup | None:
     buttons = []
     for ch in channels:
         link = await ensure_invite_link(client, ch, "channels")
-        label = f"📢 اشتراك في {ch}" if ch.startswith("@") else "📢 اشتراك في القناة"
+        if ch == PRIVATE_CHANNEL_ID:
+            label = "📢 انضم إلى القناة"
+        else:
+            label = f"📢 اشتراك في {ch}" if ch.startswith("@") else "📢 اشتراك في القناة"
         buttons.append([InlineKeyboardButton(label, url=link)])
 
-    buttons.append([InlineKeyboardButton("🔄 تحقق من الاشتراك", callback_data="check_sub")])
+    buttons.append([InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub")])
     return InlineKeyboardMarkup(buttons)
 
 @app.on_callback_query(filters.regex("^check_sub$"))
@@ -1016,7 +1033,7 @@ async def ask_domain(client: Client, message: Message):
     user_action_state[user_id] = "awaiting_search_domain"
     await message.reply("📝 أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:")
 
-@app.on_message(filters.text & ~filters.command(["start", "bc", "add_ad", "make_gift", "send_pts", "add_channel", "del_channel", "set_ref_points"]))
+@app.on_message(filters.text & \~filters.command(["start", "bc", "add_ad", "make_gift", "send_pts", "add_channel", "del_channel", "set_ref_points"]))
 async def process_domain_input(client: Client, message: Message):
     user_id = message.from_user.id
     
@@ -1075,7 +1092,6 @@ async def process_domain_input(client: Client, message: Message):
     pts = get_user_points(user_id)
     buttons_list = []
     
-    # خيارات سريعة ثابتة (مثلاً 500، 1000، 2500، 5000، 10000 إن وجدت)
     standard_steps = [500, 1000, 2500, 5000, 10000]
     row = []
     for step in standard_steps:
@@ -1092,7 +1108,6 @@ async def process_domain_input(client: Client, message: Message):
     if row:
         buttons_list.append(row)
 
-    # خيار سحب الكل بالكامل حسب النظام المطلوب بالضبط
     total_price = calculate_dynamic_price(available_count, is_owner_user)
     buttons_list.append([
         InlineKeyboardButton(
