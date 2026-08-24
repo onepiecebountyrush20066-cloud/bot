@@ -19,7 +19,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8839466034:AAF_ONFjOcoOSrcQtiTRrtWlTQJCDtR-C
 
 OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").split(",") if x.strip()]
 
-# تحديد المسار الذكي: إذا كان ينفذ على أندرويد يحفظ في المسار المحلي، وإلا يحفظ في مسار المشروع لـ Railway
 if os.path.exists("/storage/emulated/0/"):
     BASE_DIR = "/storage/emulated/0/combo-bot"
 else:
@@ -230,7 +229,7 @@ def log_search_domain(domain: str):
     conn.commit()
     conn.close()
 
-# ==================== فحص الاشتراكات والإعلانات ====================
+# ==================== فحص الاشتراكات الدقيق 100% ====================
 async def get_subscription_markup():
     conn = get_db()
     cursor = conn.cursor()
@@ -261,6 +260,7 @@ async def get_subscription_markup():
 async def check_subscription(client: Client, user_id: int) -> bool:
     if is_owner(user_id):
         return True
+    
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT channel_id FROM channels")
@@ -269,26 +269,30 @@ async def check_subscription(client: Client, user_id: int) -> bool:
     
     if not channels:
         return True
-        
+    
     for (ch,) in channels:
         try:
             ch_str = ch.strip()
             chat_id = int(ch_str) if (ch_str.startswith("-") or ch_str.isdigit()) else ch_str
             member = await client.get_chat_member(chat_id, user_id)
-            if member.status in ["kicked", "left"]:
+            
+            # حالات عدم الاشتراك الحقيقية
+            if member.status in ["left", "kicked", "banned"]:
                 return False
         except Exception:
+            # إذا فشل الجلب (مثلاً البوت ليس مشرفاً في القناة أو الآيدي خطأ) نعتبر الشرط غير متحقق أماناً
             return False
+            
     return True
 
 @app.on_callback_query(filters.regex("^check_sub$"))
 async def verify_subscription_cb(client: Client, callback: CallbackQuery):
     user_id = callback.from_user.id
     if await check_subscription(client, user_id):
-        await callback.message.edit_text("✅ شكراً لاشتراكك! يمكنك الآن استخدام البوت بكل سهولة عبر الأزرار أدناه.")
-        await client.send_message(user_id, "أهلاً بك مرة أخرى، اختر ما تحتاجه:", reply_markup=user_keyboard())
+        await callback.message.edit_text("✅ تم التحقق بنجاح! يمكنك الآن استخدام البوت بكل سهولة عبر الأزرار أدناه.")
+        await client.send_message(user_id, "أهلاً بك مجدداً في القائمة الرئيسية:", reply_markup=user_keyboard())
     else:
-        await callback.answer("❌ لم تقم بالاشتراك في جميع القنوات المطلوبة بعد!", show_alert=True)
+        await callback.answer("❌ عذراً، لم تقم بالاشتراك في جميع القنوات المطلوبة بعد!", show_alert=True)
 
 @app.on_chat_member_updated()
 async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
@@ -307,7 +311,7 @@ async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
     
     if row:
         target_ch, reward_pts = row[0], float(row[1])
-        if (not update.old_chat_member or update.old_chat_member.status in ["left", "kicked"]) and update.new_chat_member.status in ["member", "administrator"]:
+        if (not update.old_chat_member or update.old_chat_member.status in ["left", "kicked"]) and update.new_chat_member.status in ["member", "administrator", "creator"]:
             cursor.execute("SELECT 1 FROM ad_rewards WHERE user_id = ? AND channel_id = ?", (user_id, target_ch))
             if not cursor.fetchone():
                 add_user_points(user_id, reward_pts)
@@ -317,7 +321,7 @@ async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
                     await client.send_message(user_id, f"🎉 تم إضافة **{reward_pts}** نقطة لااشتراكك في القناة الإعلانية!")
                 except Exception:
                     pass
-        elif update.old_chat_member and update.old_chat_member.status in ["member", "administrator"] and update.new_chat_member.status in ["left", "kicked"]:
+        elif update.old_chat_member and update.old_chat_member.status in ["member", "administrator", "creator"] and update.new_chat_member.status in ["left", "kicked"]:
             cursor.execute("SELECT 1 FROM ad_rewards WHERE user_id = ? AND channel_id = ?", (user_id, target_ch))
             if cursor.fetchone():
                 deduct_user_points(user_id, reward_pts)
@@ -943,7 +947,7 @@ async def ask_domain(client: Client, message: Message):
             return
         if not await check_subscription(client, user_id):
             markup = await get_subscription_markup()
-            await message.reply("⚠️ يجب عليك الاشتراك في القنوات المحددة أولاً للاستخدام.", reply_markup=markup)
+            await message.reply("⚠️ يجب عليك الاشتراك في قنوات البوت أولاً لاستخدام الخدمة!", reply_markup=markup)
             return
     user_action_state[user_id] = "awaiting_search_domain"
     await message.reply("📝 أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:")
@@ -1026,7 +1030,7 @@ async def process_domain_input(client: Client, message: Message):
     if row:
         buttons_list.append(row)
 
-    # حساب السعر الجديد بناءً على طلبك (أقل من ألف 0.5، ألف 1، ألفين 2، وهكذا...)
+    # حساب السعر المخصص بناءً على طلبك (أقل من ألف 0.5، ألف 1، ألفين 2، وهكذا تصاعدياً بدقة)
     def calculate_price(count: int) -> float:
         if is_owner_user:
             return 0.0
@@ -1136,3 +1140,4 @@ async def cancel_pull_cb(client: Client, callback: CallbackQuery):
 # ==================== التشغيل ====================
 print("⚡ Bot is starting...")
 app.run()
+
