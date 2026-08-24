@@ -803,7 +803,7 @@ async def ask_domain(client: Client, message: Message):
     user_action_state[user_id] = "awaiting_search_domain"
     await message.reply("📝 أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:")
 
-@app.on_message(filters.text & \~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺)"))
+@app.on_message(filters.text & \\~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺)"))
 async def process_domain(client: Client, message: Message):
     user_id = message.from_user.id
     domain = message.text.strip().lower()
