@@ -19,6 +19,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8839466034:AAF_ONFjOcoOSrcQtiTRrtWlTQJCDtR-C
 
 OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").split(",") if x.strip()]
 
+# تحديد المسار الذكي: إذا كان ينفذ على أندرويد يحفظ في المسار المحلي، وإلا يحفظ في مسار المشروع لـ Railway
 if os.path.exists("/storage/emulated/0/"):
     BASE_DIR = "/storage/emulated/0/combo-bot"
 else:
@@ -33,27 +34,6 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 bot_enabled_for_users = True
 user_action_state = {}
-
-# قائمة الأيقونات الملونة Custom Emoji IDs
-E = {
-    'fire': '5424972470023104089',
-    'check': '5206607081334906820',
-    'sparkles': '5325547803936572038',
-    'gem': '5427168083074628963',
-    'pencil': '5395444784611480792',
-    'settings': '5341715473882955310',
-    'crown': '5217822164362739968',
-    'chart': '5231200819986047254',
-    'warning': '5447644880824181073',
-    'trophy': '5188344996356448758',
-    'people': '5258513401784573443',
-    'link': '5271604874419647061',
-    'arrow': '5416117059207572332',
-    'cross': '5210952531676504517',
-    'bulb': '5422439311196834318',
-    'bell': '5458603043203327669',
-    'search': '5422439311196834318',
-}
 
 app = Client(
     "combo_bot",
@@ -139,8 +119,6 @@ def init_db():
     ''')
     cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("total_operations", "0")')
     cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("referral_points", "1.0")')
-    cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("price_per_1k", "1.0")')
-    cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("price_under_1k", "0.5")')
     
     conn.commit()
     conn.close()
@@ -155,34 +133,6 @@ def get_db():
 
 def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
-
-def get_setting(key: str, default: str = "0") -> str:
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM bot_settings WHERE key = ?", (key,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else default
-
-def set_setting(key: str, value: str):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)", (key, str(value)))
-    conn.commit()
-    conn.close()
-
-def get_price_per_1k() -> float:
-    return float(get_setting("price_per_1k", "1.0"))
-
-def get_price_under_1k() -> float:
-    return float(get_setting("price_under_1k", "0.5"))
-
-def calculate_price(amount: int, is_owner_user: bool = False) -> float:
-    if is_owner_user:
-        return 0.0
-    if amount < 1000:
-        return get_price_under_1k()
-    return math.ceil(amount / 1000) * get_price_per_1k()
 
 # ==================== تصدير وحفظ ملف الأعضاء ====================
 def save_members_points_to_file():
@@ -259,10 +209,19 @@ def get_total_operations() -> int:
     return int(row[0]) if row else 0
 
 def get_referral_points() -> float:
-    return float(get_setting("referral_points", "1.0"))
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM bot_settings WHERE key = 'referral_points'")
+    row = cursor.fetchone()
+    conn.close()
+    return float(row[0]) if row else 1.0
 
 def set_referral_points(points: float):
-    set_setting("referral_points", str(points))
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE bot_settings SET value = ? WHERE key = 'referral_points'", (str(points),))
+    conn.commit()
+    conn.close()
 
 def log_search_domain(domain: str):
     conn = get_db()
@@ -315,7 +274,7 @@ async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
                 cursor.execute("INSERT INTO ad_rewards (user_id, channel_id) VALUES (?, ?)", (user_id, target_ch))
                 conn.commit()
                 try:
-                    await client.send_message(user_id, f"🎉 تم إضافة **{reward_pts}** نقطة لاشتراكك في القناة الإعلانية!")
+                    await client.send_message(user_id, f"🎉 تم إضافة **{reward_pts}** نقطة لااشتراكك في القناة الإعلانية!")
                 except Exception:
                     pass
         elif update.old_chat_member and update.old_chat_member.status in ["member", "administrator"] and update.new_chat_member.status in ["left", "kicked"]:
@@ -480,7 +439,7 @@ def delete_by_domain(domain: str) -> int:
     conn.close()
     return count
 
-# ==================== لوحات التحكم مع الرموز والإيموجيات الملونة ====================
+# ==================== لوحات التحكم ====================
 def owner_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("🔍 بحث عن دومين"), KeyboardButton("📤 رفع ملف ULP")],
@@ -489,9 +448,9 @@ def owner_keyboard():
         [KeyboardButton("📢 إذاعة للأعضاء"), KeyboardButton("⚙️ إعدادات الاشتراك")],
         [KeyboardButton("📈 عدد العمليات"), KeyboardButton("🔥 الأكثر والأقل طلباً")],
         [KeyboardButton("🎁 إنشاء رابط هدية"), KeyboardButton("➕ إرسال نقاط ID")],
-        [KeyboardButton("⚙️ نقاط الإحالة"), KeyboardButton("💰 تحكم بالأسعار")],
-        [KeyboardButton("📢 إضافة إعلان قناة"), KeyboardButton("📁 حفظ ملف الأعضاء")],
-        [KeyboardButton("💣 حذف كل البيانات"), KeyboardButton("📈 حالة البوت")]
+        [KeyboardButton("⚙️ نقاط الإحالة"), KeyboardButton("📢 إضافة إعلان قناة")],
+        [KeyboardButton("📁 حفظ ملف الأعضاء"), KeyboardButton("💣 حذف كل البيانات")],
+        [KeyboardButton("📈 حالة البوت")]
     ], resize_keyboard=True)
 
 def user_keyboard():
@@ -522,8 +481,8 @@ async def start_handler(client: Client, message: Message):
         save_members_points_to_file()
         
         notify_text = (
-            f"👤 <b>عضو جديد دخل البوت!</b> <tg-emoji emoji-id='{E['fire']}'>🔥</tg-emoji>\n\n"
-            f"• الاسم: <b>{first_name}</b>\n"
+            f"👤 **عضو جديد دخل البوت!**\n\n"
+            f"• الاسم: **{first_name}**\n"
             f"• اليوزر: {username}\n"
             f"• الآيدي: <code>{user_id}</code>"
         )
@@ -562,20 +521,18 @@ async def start_handler(client: Client, message: Message):
                 ref_pts = get_referral_points()
                 add_user_points(referrer_id, ref_pts)
                 try:
-                    await client.send_message(referrer_id, f"🎉 انضم عضو جديد عبر رابطك! حصلت على <b>{ref_pts}</b> نقطة.")
+                    await client.send_message(referrer_id, f"🎉 انضم عضو جديد عبر رابطك! حصلت على **{ref_pts}** نقطة.")
                 except Exception:
                     pass
 
     conn.close()
 
-    text = f"""
-<blockquote><b>أهلاً بك في بوت استخراج الكومبو والـ ULP الاحترافي</b> <tg-emoji emoji-id='{E['fire']}'>🔥</tg-emoji></blockquote>
+    text = f"""اهلا بك في <b>بوت الكومبو والخدمات السريعة</b>
 
-<blockquote><b>رصيدك ونقاطك الحالية:</b> <b>{get_user_points(user_id)}</b> نقطة <tg-emoji emoji-id='{E['gem']}'>💎</tg-emoji></blockquote>
+نقاطك الحالية: <b>{get_user_points(user_id)}</b>
 
-<blockquote><b>قناة التحديثات:</b> https://t.me/+91X31VNWIU1iNDM8
-<b>المطور:</b> @D3_1D</blockquote>
-"""
+قناتي: https://t.me/+91X31VNWIU1iNDM8
+يوزري: @D3_1D"""
 
     if is_owner(user_id):
         await message.reply(text, reply_markup=owner_keyboard())
@@ -592,7 +549,7 @@ async def start_handler(client: Client, message: Message):
 async def check_balance(client: Client, message: Message):
     user_action_state.pop(message.from_user.id, None)
     pts = get_user_points(message.from_user.id)
-    await message.reply(f"<blockquote><tg-emoji emoji-id='{E['gem']}'>💎</tg-emoji> <b>رصيدك الحالي هو:</b> <b>{pts}</b> نقطة.</blockquote>")
+    await message.reply(f"💎 رصيدك الحالي هو: <b>{pts}</b> نقطة.")
 
 @app.on_message(filters.regex("^🔗 رابط الإحالة$"))
 async def referral_link(client: Client, message: Message):
@@ -602,8 +559,8 @@ async def referral_link(client: Client, message: Message):
     link = f"https://t.me/{bot_username}?start={user_id}"
     ref_pts = get_referral_points()
     await message.reply(
-        f"<blockquote><tg-emoji emoji-id='{E['link']}'>🔗</tg-emoji> <b>رابط الإحالة الخاص بك:</b>\n<code>{link}</code>\n\n"
-        f"شاركه مع أصدقائك للحصول على <b>{ref_pts} نقطة</b> عند انضمام أي عضو جديد عبر رابطك!</blockquote>"
+        f"🔗 <b>رابط الإحالة الخاص بك:</b>\n<code>{link}</code>\n\n"
+        f"شاركه مع أصدقائك للحصول على **{ref_pts} نقطة** عند انضمام أي عضو جديد عبر رابطك!"
     )
 
 @app.on_message(filters.regex("^📺 قنوات الإعلانات$"))
@@ -616,96 +573,53 @@ async def show_ad_channels(client: Client, message: Message):
     conn.close()
     
     if not ads:
-        await message.reply("<blockquote>📺 لا توجد قنوات إعلانية متاحة حالياً لكسب النقاط.</blockquote>")
+        await message.reply("📺 لا توجد قنوات إعلانية متاحة حالياً لكسب النقاط.")
         return
         
-    txt = f"<blockquote><tg-emoji emoji-id='{E['bell']}'>📺</tg-emoji> <b>اشترك في القنوات التالية للحصول على نقاط:</b></blockquote>\n\n"
+    txt = "📺 <b>اشترك في القنوات التالية للحصول على نقاط:</b>\n\n"
     btns = []
     for ch, pts in ads:
         ch_link = f"https://t.me/{ch.replace('@', '')}" if ch.startswith("@") else ch
-        txt += f"• القناة: {ch} (المكافأة: <b>{pts}</b> نقطة)\n"
+        txt += f"• القناة: {ch} (المكافأة: **{pts}** نقطة)\n"
         btns.append([InlineKeyboardButton(f"الانضمام إلى {ch} (+{pts} نقطة)", url=ch_link)])
         
     await message.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
 # ==================== أوامر المالك ====================
-@app.on_message(filters.regex("^💰 تحكم بالأسعار$") & filters.user(OWNER_IDS))
-async def price_control(client: Client, message: Message):
-    price_1k = get_price_per_1k()
-    price_under = get_price_under_1k()
-    ref_pts = get_referral_points()
-    
-    text = f"""<blockquote><tg-emoji emoji-id='{E['settings']}'>⚙️</tg-emoji> <b>لوحة تحكم الأسعار</b>
-
-• سعر كل <b>1000</b> كومبو: <b>{price_1k}</b> نقطة
-• سعر أقل من 1000 كومبو: <b>{price_under}</b> نقطة
-• نقاط الإحالة: <b>{ref_pts}</b> نقطة
-
-لتغيير الأسعار استخدم الأوامر:
-
-<code>/set_price_1k 1.0</code>
-<code>/set_price_under 0.5</code>
-<code>/set_ref_points 1.0</code></blockquote>"""
-    await message.reply(text)
-
-@app.on_message(filters.command("set_price_1k") & filters.user(OWNER_IDS))
-async def set_price_1k_cmd(client: Client, message: Message):
-    if len(message.command) < 2:
-        await message.reply("❌ مثال: <code>/set_price_1k 1.0</code>")
-        return
-    try:
-        val = float(message.command[1])
-        set_setting("price_per_1k", str(val))
-        await message.reply(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم تغيير سعر الـ 1000 كومبو إلى <b>{val}</b> نقطة.</blockquote>")
-    except ValueError:
-        await message.reply("❌ أدخل رقم صحيح.")
-
-@app.on_message(filters.command("set_price_under") & filters.user(OWNER_IDS))
-async def set_price_under_cmd(client: Client, message: Message):
-    if len(message.command) < 2:
-        await message.reply("❌ مثال: <code>/set_price_under 0.5</code>")
-        return
-    try:
-        val = float(message.command[1])
-        set_setting("price_under_1k", str(val))
-        await message.reply(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم تغيير سعر أقل من 1000 إلى <b>{val}</b> نقطة.</blockquote>")
-    except ValueError:
-        await message.reply("❌ أدخل رقم صحيح.")
-
 @app.on_message(filters.regex("^📁 حفظ ملف الأعضاء$") & filters.user(OWNER_IDS))
 async def manual_export_members(client: Client, message: Message):
     total = save_members_points_to_file()
-    await message.reply(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم حفظ بيانات ونقاط <b>{total}</b> عضو بنجاح في المسار:\n<code>{MEMBERS_EXPORT_PATH}</code></blockquote>")
+    await message.reply(f"✅ تم حفظ بيانات ونقاط <b>{total}</b> عضو بنجاح في المسار:\n<code>{MEMBERS_EXPORT_PATH}</code>")
 
 @app.on_message(filters.regex("^⚙️ نقاط الإحالة$") & filters.user(OWNER_IDS))
 async def ref_pts_settings(client: Client, message: Message):
     current_pts = get_referral_points()
     await message.reply(
-        f"<blockquote><tg-emoji emoji-id='{E['settings']}'>⚙️</tg-emoji> <b>نقاط الإحالة الحالية:</b> <b>{current_pts}</b> نقطة.\n\n"
+        f"⚙️ **نقاط الإحالة الحالية:** <b>{current_pts}</b> نقطة لكتابة إحالة جديدة.\n\n"
         "لتغيير القيمة أرسل الأمر التالي:\n"
-        "<code>/set_ref_points 2</code></blockquote>"
+        "`/set_ref_points 2`"
     )
 
 @app.on_message(filters.command("set_ref_points") & filters.user(OWNER_IDS))
 async def set_ref_pts_cmd(client: Client, message: Message):
     if len(message.command) < 2:
-        await message.reply("❌ يرجى إدخال القيمة الجديدة! مثال:\n<code>/set_ref_points 1.5</code>")
+        await message.reply("❌ يرجى إدخال القيمة الجديدة! مثال:\n`/set_ref_points 1.5`")
         return
     try:
         pts = float(message.command[1])
         set_referral_points(pts)
-        await message.reply(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم تغيير قيمة مكافأة الإحالة إلى <b>{pts}</b> نقطة بنجاح!</blockquote>")
+        await message.reply(f"✅ تم تغيير قيمة مكافأة الإحالة إلى <b>{pts}</b> نقطة بنجاح!")
     except ValueError:
         await message.reply("❌ يرجى إدخال رقم صحيح أو عشري.")
 
 @app.on_message(filters.regex("^📢 إضافة إعلان قناة$") & filters.user(OWNER_IDS))
 async def add_ad_info(client: Client, message: Message):
-    await message.reply("📝 لإضافة قناة إعلانية مع نقاط مكافأة، استخدم الأمر:\n<code>/add_ad @channel 2</code>")
+    await message.reply("📝 لإضافة قناة إعلانية مع نقاط مكافأة، استخدم الأمر:\n`/add_ad @channel 2`")
 
 @app.on_message(filters.command("add_ad") & filters.user(OWNER_IDS))
 async def add_ad_cmd(client: Client, message: Message):
     if len(message.command) < 3:
-        await message.reply("❌ الصيغة خاطئة! استخدم:\n<code>/add_ad @channel_username POINTS</code>")
+        await message.reply("❌ الصيغة خاطئة! استخدم:\n`/add_ad @channel_username POINTS`")
         return
     ch = message.command[1]
     pts = float(message.command[2])
@@ -716,16 +630,16 @@ async def add_ad_cmd(client: Client, message: Message):
     conn.commit()
     conn.close()
     
-    await message.reply(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم إضافة القناة الإعلانية <code>{ch}</code> بمكافأة <b>{pts}</b> نقطة.</blockquote>")
+    await message.reply(f"✅ تم إضافة القناة الإعلانية <code>{ch}</code> بمكافأة <b>{pts}</b> نقطة.")
 
 @app.on_message(filters.regex("^🎁 إنشاء رابط هدية$") & filters.user(OWNER_IDS))
 async def create_gift_cmd(client: Client, message: Message):
-    await message.reply("📝 أرسل عدد النقاط للهدية بالشكل التالي:\n<code>/make_gift 5</code>")
+    await message.reply("📝 أرسل عدد النقاط للهدية بالشكل التالي:\n`/make_gift 5`")
 
 @app.on_message(filters.command("make_gift") & filters.user(OWNER_IDS))
 async def make_gift_process(client: Client, message: Message):
     if len(message.command) < 2:
-        await message.reply("❌ الاستخدام الصحيح: <code>/make_gift 5</code>")
+        await message.reply("❌ الاستخدام الصحيح: `/make_gift 5`")
         return
     pts = float(message.command[1])
     code = str(uuid.uuid4())[:8]
@@ -737,21 +651,21 @@ async def make_gift_process(client: Client, message: Message):
     
     bot_username = (await client.get_me()).username
     link = f"https://t.me/{bot_username}?start=gift_{code}"
-    await message.reply(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم إنشاء رابط الهدية بنجاح بقيمة <b>{pts}</b> نقطة:\n\n{link}</blockquote>")
+    await message.reply(f"✅ تم إنشاء رابط الهدية بنجاح بقيمة <b>{pts}</b> نقطة:\n\n{link}")
 
 @app.on_message(filters.regex("^➕ إرسال نقاط ID$") & filters.user(OWNER_IDS))
 async def send_points_id_cmd(client: Client, message: Message):
-    await message.reply("📝 لإرسال نقاط لشخص عبر الآيدي استخدم الأمر:\n<code>/send_pts USER_ID POINTS</code>")
+    await message.reply("📝 لإرسال نقاط لشخص عبر الآيدي استخدم الأمر:\n`/send_pts USER_ID POINTS`")
 
 @app.on_message(filters.command("send_pts") & filters.user(OWNER_IDS))
 async def process_send_pts(client: Client, message: Message):
     if len(message.command) < 3:
-        await message.reply("❌ صيغة غير صحيحة! استخدم:\n<code>/send_pts USER_ID POINTS</code>")
+        await message.reply("❌ صيغة غير صحيحة! استخدم:\n`/send_pts USER_ID POINTS`")
         return
     target_id = int(message.command[1])
     pts = float(message.command[2])
     add_user_points(target_id, pts)
-    await message.reply(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم إضافة <b>{pts}</b> نقطة للمستخدم <code>{target_id}</code> بنجاح.</blockquote>")
+    await message.reply(f"✅ تم إضافة <b>{pts}</b> نقطة للمستخدم <code>{target_id}</code> بنجاح.")
 
 @app.on_message(filters.regex("^⚙️ إعدادات الاشتراك$") & filters.user(OWNER_IDS))
 async def channel_settings(client: Client, message: Message):
@@ -761,15 +675,15 @@ async def channel_settings(client: Client, message: Message):
     rows = cursor.fetchall()
     conn.close()
     
-    txt = f"<blockquote><tg-emoji emoji-id='{E['settings']}'>⚙️</tg-emoji> <b>قنوات الاشتراك الإجباري الحالية:</b></blockquote>\n\n"
+    txt = "📢 <b>قنوات الاشتراك الإجباري الحالية:</b>\n\n"
     if rows:
         for (ch,) in rows:
             txt += f"• <code>{ch}</code>\n"
     else:
         txt += "لا توجد قنوات إجبارية مضافة حالياً.\n"
         
-    txt += "\n➕ لإضافة قناة استخدم: <code>/add_channel @username</code>\n"
-    txt += "🗑 لإزالة قناة استخدم: <code>/del_channel @username</code>"
+    txt += "\n➕ لإضافة قناة استخدم: `/add_channel @username`\n"
+    txt += "🗑 لإزالة قناة استخدم: `/del_channel @username`"
     await message.reply(txt)
 
 @app.on_message(filters.command("add_channel") & filters.user(OWNER_IDS))
@@ -783,7 +697,7 @@ async def add_channel_cmd(client: Client, message: Message):
     cursor.execute("INSERT OR REPLACE INTO channels (channel_id) VALUES (?)", (ch,))
     conn.commit()
     conn.close()
-    await message.reply(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم إضافة القناة <code>{ch}</code> للاشتراك الإجباري.</blockquote>")
+    await message.reply(f"✅ تم إضافة القناة <code>{ch}</code> لـ الاشتراك الإجباري.")
 
 @app.on_message(filters.command("del_channel") & filters.user(OWNER_IDS))
 async def del_channel_cmd(client: Client, message: Message):
@@ -796,17 +710,17 @@ async def del_channel_cmd(client: Client, message: Message):
     cursor.execute("DELETE FROM channels WHERE channel_id = ?", (ch,))
     conn.commit()
     conn.close()
-    await message.reply(f"<blockquote>🗑 تم حذف القناة <code>{ch}</code> بنجاح.</blockquote>")
+    await message.reply(f"🗑 تم حذف القناة <code>{ch}</code> بنجاح.")
 
 @app.on_message(filters.regex("^📢 إذاعة للأعضاء$") & filters.user(OWNER_IDS))
 async def broadcast_ask(client: Client, message: Message):
-    await message.reply("📝 قم بعمل Reply على الرسالة التي تريد إذاعتها واكتب <code>/bc</code>")
+    await message.reply("📝 قم بعمل Reply على الرسالة التي تريد إذاعتها واكتب `/bc`")
 
 @app.on_message(filters.command("bc") & filters.user(OWNER_IDS))
 async def start_broadcast(client: Client, message: Message):
     target_msg = message.reply_to_message
     if not target_msg:
-        await message.reply("❌ يجب الرد على الرسالة المراد إذاعتها بـ <code>/bc</code>")
+        await message.reply("❌ يجب الرد على الرسالة المراد إذاعتها بـ `/bc`")
         return
         
     conn = get_db()
@@ -815,7 +729,7 @@ async def start_broadcast(client: Client, message: Message):
     users = cursor.fetchall()
     conn.close()
     
-    await message.reply(f"<blockquote>🚀 جاري بدء الإذاعة لـ <b>{len(users)}</b> عضو وتحديث كشف الحظر...</blockquote>")
+    await message.reply(f"🚀 جاري بدء الإذاعة لـ <b>{len(users)}</b> عضو وتحديث كشف الحظر...")
     success, failed = 0, 0
     
     for (uid,) in users:
@@ -835,11 +749,11 @@ async def start_broadcast(client: Client, message: Message):
         except Exception:
             failed += 1
             
-    await message.reply(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> اكتملت الإذاعة!\n🟢 النجاح (النشطين): {success}\n🔴 الفشل (المحظورين): {failed}</blockquote>")
+    await message.reply(f"✅ اكتملت الإذاعة!\n🟢 النجاح (النشطين): {success}\n🔴 الفشل (المحظورين): {failed}")
 
 @app.on_message(filters.regex("^📈 عدد العمليات$") & filters.user(OWNER_IDS))
 async def ops_count(client: Client, message: Message):
-    await message.reply(f"<blockquote><tg-emoji emoji-id='{E['chart']}'>📊</tg-emoji> <b>إجمالي عمليات الاستخراج:</b> <b>{get_total_operations():,}</b></blockquote>")
+    await message.reply(f"📊 إجمالي عمليات الاستخراج: <b>{get_total_operations():,}</b>")
 
 @app.on_message(filters.regex("^🔥 الأكثر والأقل طلباً$") & filters.user(OWNER_IDS))
 async def top_and_least_searched(client: Client, message: Message):
@@ -852,11 +766,11 @@ async def top_and_least_searched(client: Client, message: Message):
     least_searches = cursor.fetchall()
     conn.close()
     
-    txt = f"<blockquote><tg-emoji emoji-id='{E['fire']}'>🔥</tg-emoji> <b>أكثر المواقع طلباً:</b></blockquote>\n"
+    txt = "🔥 <b>أكثر المواقع طلباً:</b>\n"
     for d, c in top_searches:
         txt += f"• <code>{d}</code> → {c} مرة\n"
         
-    txt += "\n<blockquote>❄️ <b>أقل المواقع طلباً:</b></blockquote>\n"
+    txt += "\n❄️ <b>أقل المواقع طلباً:</b>\n"
     for d, c in least_searches:
         txt += f"• <code>{d}</code> → {c} مرة\n"
         
@@ -880,29 +794,29 @@ async def clean_unused(client: Client, callback: CallbackQuery):
         deleted_total += delete_by_domain(dom)
         
     conn.close()
-    await callback.message.edit_text(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم حذف <b>{deleted_total:,}</b> كومبو للمواقع الضعيفة الطلب.</blockquote>")
+    await callback.message.edit_text(f"✅ تم حذف <b>{deleted_total:,}</b> كومبو للمواقع الضعيفة الطلب.")
 
 @app.on_message(filters.regex("^✅ تفعيل البوت$") & filters.user(OWNER_IDS))
 async def enable_bot(client: Client, message: Message):
     global bot_enabled_for_users
     bot_enabled_for_users = True
-    await message.reply("<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم تفعيل البوت للأعضاء بنجاح.</blockquote>")
+    await message.reply("✅ تم تفعيل البوت للأعضاء بنجاح.")
 
 @app.on_message(filters.regex("^🚫 إغلاق البوت$") & filters.user(OWNER_IDS))
 async def disable_bot(client: Client, message: Message):
     global bot_enabled_for_users
     bot_enabled_for_users = False
-    await message.reply("<blockquote>🚫 تم إغلاق البوت عن الأعضاء.</blockquote>")
+    await message.reply("🚫 تم إغلاق البوت عن الأعضاء.")
 
 @app.on_message(filters.regex("^📈 حالة البوت$") & filters.user(OWNER_IDS))
 async def bot_status(client: Client, message: Message):
     status = "🟢 مفعل للأعضاء" if bot_enabled_for_users else "🔴 مغلق عن الأعضاء"
-    await message.reply(f"<blockquote>حالة البوت حالياً:\n\n<b>{status}</b></blockquote>")
+    await message.reply(f"حالة البوت حالياً:\n\n{status}")
 
 @app.on_message(filters.regex("^📊 الإحصائيات$") & filters.user(OWNER_IDS))
 async def show_stats(client: Client, message: Message):
     total, top_domains, total_users, blocked_users, active_users = get_stats()
-    text = f"""<blockquote><tg-emoji emoji-id='{E['chart']}'>📊</tg-emoji> <b>إحصائيات البوت الكاملة</b>
+    text = f"""📊 <b>إحصائيات البوت الكاملة</b>
 
 👥 <b>إحصائيات الأعضاء:</b>
 • إجمالي المسجلين: <b>{total_users:,}</b>
@@ -912,7 +826,7 @@ async def show_stats(client: Client, message: Message):
 📦 <b>إحصائيات الكومبو:</b>
 • إجمالي الكومبوهات: <b>{total:,}</b>
 
-🔥 <b>أكثر الدومينات توفراً:</b></blockquote>
+🔥 <b>أكثر الدومينات توفراً:</b>
 """
     if top_domains:
         for i, (domain, count) in enumerate(top_domains, 1):
@@ -927,7 +841,7 @@ async def confirm_delete_all(client: Client, message: Message):
         [InlineKeyboardButton("✅ نعم احذف الكل", callback_data="confirm_delete_all"),
          InlineKeyboardButton("❌ إلغاء", callback_data="cancel_delete")]
     ])
-    await message.reply("<blockquote>⚠️ هل أنت متأكد من حذف <b>كل</b> البيانات؟</blockquote>", reply_markup=buttons)
+    await message.reply("⚠️ هل أنت متأكد من حذف <b>كل</b> البيانات؟", reply_markup=buttons)
 
 @app.on_callback_query(filters.regex("^confirm_delete_all$"))
 async def delete_all_confirmed(client: Client, callback):
@@ -935,22 +849,22 @@ async def delete_all_confirmed(client: Client, callback):
         return
     await callback.answer()
     delete_all_combos()
-    await callback.message.edit_text("<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم حذف كل البيانات بنجاح.</blockquote>")
+    await callback.message.edit_text("✅ تم حذف كل البيانات بنجاح.")
 
 @app.on_callback_query(filters.regex("^cancel_delete$"))
 async def cancel_delete(client: Client, callback):
     await callback.answer()
-    await callback.message.edit_text("<blockquote>❌ تم إلغاء عملية الحذف.</blockquote>")
+    await callback.message.edit_text("❌ تم إلغاء عملية الحذف.")
 
 @app.on_message(filters.regex("^🗑 حذف حسب دومين$") & filters.user(OWNER_IDS))
 async def ask_domain_delete(client: Client, message: Message):
     user_action_state[message.from_user.id] = "awaiting_domain_delete"
-    await message.reply("<blockquote>📝 أرسل اسم الدومين الذي تريد حذفه بالكامل:</blockquote>")
+    await message.reply("📝 أرسل اسم الدومين الذي تريد حذفه بالكامل:")
 
 # ==================== رفع الملفات ====================
 @app.on_message(filters.regex("^📤 رفع ملف ULP$") & filters.user(OWNER_IDS))
 async def ask_file(client: Client, message: Message):
-    await message.reply(f"<blockquote><tg-emoji emoji-id='{E['sparkles']}'>📤</tg-emoji> أرسل ملفات الـ <b>ULP</b> الآن لمعالجتها وإضافتها للكومبو وحفظها...</blockquote>")
+    await message.reply("📤 أرسل ملفات الـ <b>ULP</b> الآن لمعالجتها وإضافتها للكومبو وحفظها...")
 
 @app.on_message(filters.document & filters.user(OWNER_IDS))
 async def handle_large_document(client: Client, message: Message):
@@ -960,17 +874,17 @@ async def handle_large_document(client: Client, message: Message):
 
         saved_file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex[:6]}_{file_name}")
 
-        msg = await message.reply(f"<blockquote>⏳ جاري تحميل وحفظ الملف: <b>{file_name}</b> ({file_size / 1024 / 1024:.2f} MB)...</blockquote>")
+        msg = await message.reply(f"⏳ جاري تحميل وحفظ الملف: <b>{file_name}</b> ({file_size / 1024 / 1024:.2f} MB)...")
         await message.download(file_name=saved_file_path)
 
-        await msg.edit_text("<blockquote>⏳ جاري معالجة الترميز وإضافة الكومبوهات إلى قاعدة البيانات...</blockquote>")
+        await msg.edit_text("⏳ جاري معالجة الترميز وإضافة الكومبوهات إلى قاعدة البيانات...")
         added = add_combos_from_file(saved_file_path)
 
         await msg.edit_text(
-            f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> <b>تم رفع ومعالجة الملف بنجاح!</b>\n\n"
+            f"✅ تم رفع ومعالجة الملف بنجاح!\n\n"
             f"📁 اسم الملف: <b>{file_name}</b>\n"
             f"➕ عدد الكومبو المضاف: <b>{added:,}</b>\n"
-            f"💾 تم حفظ النسخة في المسار:\n<code>{saved_file_path}</code></blockquote>"
+            f"💾 تم حفظ النسخة في المسار:\n<code>{saved_file_path}</code>"
         )
 
     except Exception as e:
@@ -988,9 +902,9 @@ async def ask_domain(client: Client, message: Message):
             await message.reply("⚠️ يجب عليك الاشتراك في القنوات المحددة أولاً للاستخدام.")
             return
     user_action_state[user_id] = "awaiting_search_domain"
-    await message.reply(f"<blockquote><tg-emoji emoji-id='{E['pencil']}'>✍️</tg-emoji> <b>أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:</b></blockquote>")
+    await message.reply("📝 أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:")
 
-@app.on_message(filters.text & \~filters.command(["start", "bc", "add_ad", "make_gift", "send_pts", "add_channel", "del_channel", "set_ref_points", "set_price_1k", "set_price_under"]))
+@app.on_message(filters.text & ~filters.command(["start", "bc", "add_ad", "make_gift", "send_pts", "add_channel", "del_channel", "set_ref_points"]))
 async def process_domain_input(client: Client, message: Message):
     user_id = message.from_user.id
     
@@ -999,8 +913,7 @@ async def process_domain_input(client: Client, message: Message):
         "✅ تفعيل البوت", "🚫 إغلاق البوت", "📢 إذاعة للأعضاء", "⚙️ إعدادات الاشتراك",
         "📈 عدد العمليات", "🔥 الأكثر والأقل طلباً", "🎁 إنشاء رابط هدية", "➕ إرسال نقاط ID",
         "⚙️ نقاط الإحالة", "📢 إضافة إعلان قناة", "💣 حذف كل البيانات", "📈 حالة البوت",
-        "💰 رصيدي ونقاطي", "🔗 رابط الإحالة", "📺 قنوات الإعلانات", "📁 حفظ ملف الأعضاء",
-        "💰 تحكم بالأسعار"
+        "💰 رصيدي ونقاطي", "🔗 رابط الإحالة", "📺 قنوات الإعلانات", "📁 حفظ ملف الأعضاء"
     ]:
         return
 
@@ -1017,7 +930,7 @@ async def process_domain_input(client: Client, message: Message):
         user_action_state.pop(user_id, None)
         try:
             deleted = await asyncio.to_thread(delete_by_domain, domain)
-            await message.reply(f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم حذف <b>{deleted:,}</b> كومبو متعلق بـ <b>{domain}</b></blockquote>")
+            await message.reply(f"✅ تم حذف <b>{deleted:,}</b> كومبو متعلق بـ <b>{domain}</b>")
         except Exception as e:
             await message.reply(f"❌ فشل الحذف: <code>{e}</code>")
         return
@@ -1039,10 +952,10 @@ async def process_domain_input(client: Client, message: Message):
     available_count = await asyncio.to_thread(count_available_combos, domain)
 
     if available_count <= 0:
-        await message.reply(f"<blockquote>❌ للأسف، لا توجد أية حسابات متوفرة حالياً لموقع <b>{domain}</b>.</blockquote>")
+        await message.reply(f"❌ للأسف، لا توجد أية حسابات متوفرة حالياً لموقع <b>{domain}</b>.")
         for owner in OWNER_IDS:
             try:
-                await client.send_message(owner, f"⚠️ <b>إشعار طلب:</b> تم البحث عن <code>{domain}</code> وهو غير متوفر!")
+                await client.send_message(owner, f"⚠️ **إشعار طلب:** تم البحث عن <code>{domain}</code> وهو غير متوفر!")
             except Exception:
                 pass
         return
@@ -1055,7 +968,7 @@ async def process_domain_input(client: Client, message: Message):
     row = []
     for k in range(1, min(max_k + 1, 11)):
         amount = k * 1000
-        price = calculate_price(amount, is_owner_user)
+        price = 0.0 if is_owner_user else float(k)
         btn = InlineKeyboardButton(
             f"📥 {k}K ({price} ن)", 
             callback_data=f"buy_{amount}_{price}_{domain}"
@@ -1068,7 +981,7 @@ async def process_domain_input(client: Client, message: Message):
     if row:
         buttons_list.append(row)
 
-    total_price = calculate_price(available_count, is_owner_user)
+    total_price = 0.0 if is_owner_user else float(math.ceil(available_count / 1000))
     buttons_list.append([
         InlineKeyboardButton(
             f"🚀 سحب الكل ({available_count:,} حساب) بـ {total_price} نقطة", 
@@ -1081,10 +994,10 @@ async def process_domain_input(client: Client, message: Message):
     ])
 
     await message.reply(
-        f"<blockquote>🎯 <b>الموقع المطلوب:</b> <code>{domain}</code>\n"
-        f"📊 <b>الحسابات المتوفرة:</b> <b>{available_count:,}</b> حساب\n"
-        f"💳 <b>رصيدك الحالي:</b> <b>{pts}</b> نقطة\n\n"
-        "<b>اختر الكمية التي تريد سحبها من الأزرار أدناه:</b></blockquote>",
+        f"🎯 **الموقع المطلوب:** <code>{domain}</code>\n"
+        f"📊 **الحسابات المتوفرة:** <b>{available_count:,}</b> حساب\n"
+        f"💳 **رصيدك الحالي:** <b>{pts}</b> نقطة\n\n"
+        "اختر الكمية التي تريد سحبها من الأزرار أدناه:",
         reply_markup=InlineKeyboardMarkup(buttons_list)
     )
 
@@ -1106,7 +1019,7 @@ async def handle_buy_callback(client: Client, callback: CallbackQuery):
 
     await callback.answer("⏳ جاري بدء الاستخراج والمعالجة...")
     status_msg = await callback.message.edit_text(
-        f"<blockquote>⚡ جاري استخراج <b>{amount_to_pull:,}</b> كومبو لموقع <b>{domain}</b>...</blockquote>"
+        f"⚡ جاري استخراج <b>{amount_to_pull:,}</b> كومبو لموقع <b>{domain}</b>..."
     )
 
     try:
@@ -1119,7 +1032,7 @@ async def handle_buy_callback(client: Client, callback: CallbackQuery):
         results = await fetch_and_delete_combos(domain, amount_to_pull)
 
         if not results:
-            await status_msg.edit_text(f"<blockquote>❌ حدث خطأ أو تم سحب البيانات من قبل مستخدم آخر لموقع <b>{domain}</b>.</blockquote>")
+            await status_msg.edit_text(f"❌ حدث خطأ أو تم سحب البيانات من قبل مستخدم آخر لموقع <b>{domain}</b>.")
             return
 
         fetched_count = len(results)
@@ -1129,8 +1042,8 @@ async def handle_buy_callback(client: Client, callback: CallbackQuery):
             f.write("\n".join(results))
 
         caption = (
-            f"<blockquote><tg-emoji emoji-id='{E['check']}'>✅</tg-emoji> تم استخراج <b>{fetched_count:,}</b> كومبو لـ <b>{domain}</b>\n"
-            f"💳 الخصم: <b>{required_points}</b> نقطة</blockquote>"
+            f"✅ تم استخراج <b>{fetched_count:,}</b> كومبو لـ <b>{domain}</b>\n"
+            f"💳 الخصم: <b>{required_points}</b> نقطة"
         )
         
         await client.send_document(
@@ -1164,7 +1077,7 @@ async def handle_buy_callback(client: Client, callback: CallbackQuery):
 @app.on_callback_query(filters.regex("^cancel_pull$"))
 async def cancel_pull_cb(client: Client, callback: CallbackQuery):
     await callback.answer()
-    await callback.message.edit_text("<blockquote>❌ تم إلغاء العملية.</blockquote>")
+    await callback.message.edit_text("❌ تم إلغاء العملية.")
 
 # ==================== التشغيل ====================
 print("⚡ Bot is starting...")
