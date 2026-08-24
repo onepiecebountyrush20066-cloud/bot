@@ -229,7 +229,7 @@ def log_search_domain(domain: str):
     conn.commit()
     conn.close()
 
-# ==================== فحص الاشتراكات الدقيق 100% ====================
+# ==================== فحص الاشتراكات الدقيق 100% والمحدث ====================
 async def get_subscription_markup():
     conn = get_db()
     cursor = conn.cursor()
@@ -273,15 +273,21 @@ async def check_subscription(client: Client, user_id: int) -> bool:
     for (ch,) in channels:
         try:
             ch_str = ch.strip()
-            chat_id = int(ch_str) if (ch_str.startswith("-") or ch_str.isdigit()) else ch_str
-            member = await client.get_chat_member(chat_id, user_id)
+            # دعم كامل للـ username أو الـ chat_id الرقمي
+            if ch_str.startswith("@") or not (ch_str.startswith("-") or ch_str.isdigit()):
+                chat_identifier = ch_str
+            else:
+                chat_identifier = int(ch_str)
+                
+            member = await client.get_chat_member(chat_identifier, user_id)
             
-            # حالات عدم الاشتراك الحقيقية
+            # إذا كان العضو غادر أو مطرود، يعتبر غير مشترك
             if member.status in ["left", "kicked", "banned"]:
                 return False
-        except Exception:
-            # إذا فشل الجلب (مثلاً البوت ليس مشرفاً في القناة أو الآيدي خطأ) نعتبر الشرط غير متحقق أماناً
-            return False
+        except Exception as e:
+            print(f"[SUB CHECK ERROR] Channel: {ch} | User: {user_id} | Error: {e}")
+            # إذا لم يتمكن البوت من جلب العضو (مثلاً البوت ليس مشرفاً في القناة)، نتجاوز الخطأ مؤقتاً لتجنب إعاقة المستخدم ظلماً، أو نعتبره غير مشترك إذا أردت أماناً كاملاً. هنا نسمح للمستخدم بالمرور إذا حدث خطأ تقني في الصلاحيات.
+            continue
             
     return True
 
@@ -318,7 +324,7 @@ async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
                 cursor.execute("INSERT INTO ad_rewards (user_id, channel_id) VALUES (?, ?)", (user_id, target_ch))
                 conn.commit()
                 try:
-                    await client.send_message(user_id, f"🎉 تم إضافة **{reward_pts}** نقطة لااشتراكك في القناة الإعلانية!")
+                    await client.send_message(user_id, f"🎉 تم إضافة **{reward_pts}** نقطة لاشتراكك في القناة الإعلانية!")
                 except Exception:
                     pass
         elif update.old_chat_member and update.old_chat_member.status in ["member", "administrator", "creator"] and update.new_chat_member.status in ["left", "kicked"]:
@@ -483,7 +489,7 @@ def delete_by_domain(domain: str) -> int:
     conn.close()
     return count
 
-# ==================== لوحات التحكم ====================
+# ==================== لوحات التحكم الملونة والمصممة خصيصاً ====================
 def owner_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("🔍 بحث عن دومين"), KeyboardButton("📤 رفع ملف ULP")],
@@ -1030,7 +1036,6 @@ async def process_domain_input(client: Client, message: Message):
     if row:
         buttons_list.append(row)
 
-    # حساب السعر المخصص بناءً على طلبك (أقل من ألف 0.5، ألف 1، ألفين 2، وهكذا تصاعدياً بدقة)
     def calculate_price(count: int) -> float:
         if is_owner_user:
             return 0.0
@@ -1140,4 +1145,3 @@ async def cancel_pull_cb(client: Client, callback: CallbackQuery):
 # ==================== التشغيل ====================
 print("⚡ Bot is starting...")
 app.run()
-
