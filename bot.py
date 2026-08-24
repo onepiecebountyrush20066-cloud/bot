@@ -3,6 +3,7 @@ import re
 import sqlite3
 import uuid
 import asyncio
+import math
 from collections import Counter
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -17,7 +18,7 @@ API_HASH = os.getenv("API_HASH", "a860b181d2f15d0473ee309523a9fc19")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8839466034:AAF_ONFjOcoOSrcQtiTRrtWlTQJCDtR-Cxw")
 
 OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").split(",") if x.strip()]
-DB_PATH = os.getenv("DB_PATH", "/data/combos.db")   # مهم لـ Railway Volume
+DB_PATH = os.getenv("DB_PATH", "combos.db")
 bot_enabled_for_users = True
 
 user_action_state = {}
@@ -27,12 +28,15 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workdir="/tmp"          # يمنع مشاكل الكتابة على الملفات المؤقتة
+    workdir="/tmp" if os.path.exists("/tmp") else "."
 )
 
 # ==================== إدارة قاعدة البيانات ====================
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    dirname = os.path.dirname(DB_PATH)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
+        
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -102,10 +106,11 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS bot_settings (
             key TEXT PRIMARY KEY,
-            value INTEGER DEFAULT 0
+            value TEXT NOT NULL
         )
     ''')
-    cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("total_operations", 0)')
+    cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("total_operations", "0")')
+    cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES ("referral_points", "1.0")')
     
     conn.commit()
     conn.close()
@@ -121,7 +126,7 @@ def get_db():
 def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
-# ==================== إدارة النقاط والمستخدمين ====================
+# ==================== إدارة النقاط والمهمات ====================
 def get_user_points(user_id: int) -> float:
     conn = get_db()
     cursor = conn.cursor()
@@ -159,7 +164,7 @@ def update_user_block_status(user_id: int, status: int):
 def increment_operations():
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("UPDATE bot_settings SET value = value + 1 WHERE key = 'total_operations'")
+    cursor.execute("UPDATE bot_settings SET value = CAST(value AS INTEGER) + 1 WHERE key = 'total_operations'")
     conn.commit()
     conn.close()
 
@@ -169,7 +174,22 @@ def get_total_operations() -> int:
     cursor.execute("SELECT value FROM bot_settings WHERE key = 'total_operations'")
     row = cursor.fetchone()
     conn.close()
-    return row[0] if row else 0
+    return int(row[0]) if row else 0
+
+def get_referral_points() -> float:
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM bot_settings WHERE key = 'referral_points'")
+    row = cursor.fetchone()
+    conn.close()
+    return float(row[0]) if row else 1.0
+
+def set_referral_points(points: float):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE bot_settings SET value = ? WHERE key = 'referral_points'", (str(points),))
+    conn.commit()
+    conn.close()
 
 def log_search_domain(domain: str):
     conn = get_db()
@@ -237,7 +257,16 @@ async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
                     pass
     conn.close()
 
-# ==================== معالجة السحب المباشر والسريع ====================
+# ==================== معالجة قاعدة البيانات للكومبو ====================
+def count_available_combos(domain: str) -> int:
+    conn = get_db()
+    cursor = conn.cursor()
+    query = f"%{domain.lower()}%"
+    cursor.execute("SELECT COUNT(*) FROM combos WHERE LOWER(combo) LIKE ?", (query,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
 def extract_email_pass(line: str) -> str:
     parts = line.strip().split(':')
     if len(parts) >= 2:
@@ -387,8 +416,8 @@ def owner_keyboard():
         [KeyboardButton("📢 إذاعة للأعضاء"), KeyboardButton("⚙️ إعدادات الاشتراك")],
         [KeyboardButton("📈 عدد العمليات"), KeyboardButton("🔥 الأكثر والأقل طلباً")],
         [KeyboardButton("🎁 إنشاء رابط هدية"), KeyboardButton("➕ إرسال نقاط ID")],
-        [KeyboardButton("📢 إضافة إعلان قناة"), KeyboardButton("💣 حذف كل البيانات")],
-        [KeyboardButton("📈 حالة البوت")]
+        [KeyboardButton("⚙️ نقاط الإحالة"), KeyboardButton("📢 إضافة إعلان قناة")],
+        [KeyboardButton("💣 حذف كل البيانات"), KeyboardButton("📈 حالة البوت")]
     ], resize_keyboard=True)
 
 def user_keyboard():
@@ -453,9 +482,10 @@ async def start_handler(client: Client, message: Message):
             if referrer_id != user_id and not is_existing_user:
                 cursor.execute("UPDATE users SET referred_by = ? WHERE user_id = ?", (referrer_id, user_id))
                 conn.commit()
-                add_user_points(referrer_id, 1.0)
+                ref_pts = get_referral_points()
+                add_user_points(referrer_id, ref_pts)
                 try:
-                    await client.send_message(referrer_id, f"🎉 انضم عضو جديد عبر رابطك! حصلت على **1** نقطة.")
+                    await client.send_message(referrer_id, f"🎉 انضم عضو جديد عبر رابطك! حصلت على **{ref_pts}** نقطة.")
                 except Exception:
                     pass
 
@@ -490,9 +520,10 @@ async def referral_link(client: Client, message: Message):
     bot_username = (await client.get_me()).username
     user_id = message.from_user.id
     link = f"https://t.me/{bot_username}?start={user_id}"
+    ref_pts = get_referral_points()
     await message.reply(
         f"🔗 <b>رابط الإحالة الخاص بك:</b>\n<code>{link}</code>\n\n"
-        "شاركه مع أصدقائك للحصول على **1 نقطة** عند انضمام أي عضو جديد لأول مرة عبر رابطك!"
+        f"شاركه مع أصدقائك للحصول على **{ref_pts} نقطة** عند انضمام أي عضو جديد عبر رابطك!"
     )
 
 @app.on_message(filters.regex("^📺 قنوات الإعلانات$"))
@@ -517,6 +548,27 @@ async def show_ad_channels(client: Client, message: Message):
     await message.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
 # ==================== أوامر المالك ====================
+@app.on_message(filters.regex("^⚙️ نقاط الإحالة$") & filters.user(OWNER_IDS))
+async def ref_pts_settings(client: Client, message: Message):
+    current_pts = get_referral_points()
+    await message.reply(
+        f"⚙️ **نقاط الإحالة الحالية:** <b>{current_pts}</b> نقطة لكتابة إحالة جديدة.\n\n"
+        "لتغيير القيمة أرسل الأمر التالي:\n"
+        "`/set_ref_points 2`"
+    )
+
+@app.on_message(filters.command("set_ref_points") & filters.user(OWNER_IDS))
+async def set_ref_pts_cmd(client: Client, message: Message):
+    if len(message.command) < 2:
+        await message.reply("❌ يرجى إدخال القيمة الجديدة! مثال:\n`/set_ref_points 1.5`")
+        return
+    try:
+        pts = float(message.command[1])
+        set_referral_points(pts)
+        await message.reply(f"✅ تم تغيير قيمة مكافأة الإحالة إلى <b>{pts}</b> نقطة بنجاح!")
+    except ValueError:
+        await message.reply("❌ يرجى إدخال رقم صحيح أو عشري.")
+
 @app.on_message(filters.regex("^📢 إضافة إعلان قناة$") & filters.user(OWNER_IDS))
 async def add_ad_info(client: Client, message: Message):
     await message.reply("📝 لإضافة قناة إعلانية مع نقاط مكافأة، استخدم الأمر:\n`/add_ad @channel 2`")
@@ -726,7 +778,7 @@ async def show_stats(client: Client, message: Message):
 👥 <b>إحصائيات الأعضاء:</b>
 • إجمالي المسجلين: <b>{total_users:,}</b>
 • الأعضاء النشطين: <b>{active_users:,}</b>
-• قاموا بحظر البوت: <b>{blocked_users:,}</b>
+• قامت بحظر البوت: <b>{blocked_users:,}</b>
 
 📦 <b>إحصائيات الكومبو:</b>
 • إجمالي الكومبوهات: <b>{total:,}</b>
@@ -778,7 +830,7 @@ async def handle_large_document(client: Client, message: Message):
         file_size = message.document.file_size or 0
 
         msg = await message.reply(f"⏳ جاري تحميل الملف: <b>{file_name}</b> ({file_size / 1024 / 1024:.2f} MB)...")
-        temp_path = await message.download(file_name=f"/tmp/temp_{message.id}_{file_name}")
+        temp_path = await message.download(file_name=f"temp_{message.id}_{file_name}")
 
         await msg.edit_text("⏳ جاري معالجة الترميز وإضافة الكومبوهات إلى قاعدة البيانات...")
         added = add_combos_from_file(temp_path)
@@ -789,7 +841,7 @@ async def handle_large_document(client: Client, message: Message):
     except Exception as e:
         await message.reply(f"❌ حصل خطأ أثناء رفع الملف:\n<code>{str(e)}</code>")
 
-# ==================== نظام البحث المطور ====================
+# ==================== نظام المعاينة والتسعير الديناميكي ====================
 @app.on_message(filters.regex("^🔍 بحث عن دومين$"))
 async def ask_domain(client: Client, message: Message):
     user_id = message.from_user.id
@@ -803,8 +855,8 @@ async def ask_domain(client: Client, message: Message):
     user_action_state[user_id] = "awaiting_search_domain"
     await message.reply("📝 أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:")
 
-@app.on_message(filters.text & \\~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺)"))
-async def process_domain(client: Client, message: Message):
+@app.on_message(filters.text & ~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺)"))
+async def process_domain_input(client: Client, message: Message):
     user_id = message.from_user.id
     domain = message.text.strip().lower()
 
@@ -823,7 +875,6 @@ async def process_domain(client: Client, message: Message):
     user_action_state.pop(user_id, None)
 
     is_owner_user = is_owner(user_id)
-    
     if not is_owner_user:
         if not bot_enabled_for_users:
             await message.reply("⚠️ البوت حالياً مغلق عن الأعضاء.")
@@ -832,66 +883,115 @@ async def process_domain(client: Client, message: Message):
             await message.reply("⚠️ يجب عليك الاشتراك في القنوات الإجبارية لاستخدام البوت.")
             return
 
+    # فحص ومعاينة العدد المتاح بالموقع
+    available_count = await asyncio.to_thread(count_available_combos, domain)
+
+    if available_count <= 0:
+        await message.reply(f"❌ للأسف، لا توجد أية حسابات متوفرة حالياً لموقع <b>{domain}</b>.")
+        for owner in OWNER_IDS:
+            try:
+                await client.send_message(owner, f"⚠️ **إشعار طلب:** تم البحث عن <code>{domain}</code> وهو غير متوفر!")
+            except Exception:
+                pass
+        return
+
+    pts = get_user_points(user_id)
+
+    # بناء الأزرار الشفافة المتعددة للآلاف
+    buttons_list = []
+    max_k = available_count // 1000
+
+    row = []
+    for k in range(1, min(max_k + 1, 11)):
+        amount = k * 1000
+        price = 0.0 if is_owner_user else float(k)
+        btn = InlineKeyboardButton(
+            f"📥 {k}K ({price} ن)", 
+            callback_data=f"buy_{amount}_{price}_{domain}"
+        )
+        row.append(btn)
+        if len(row) == 2:
+            buttons_list.append(row)
+            row = []
+            
+    if row:
+        buttons_list.append(row)
+
+    # زر سحب الكل
+    total_price = 0.0 if is_owner_user else float(math.ceil(available_count / 1000))
+    buttons_list.append([
+        InlineKeyboardButton(
+            f"🚀 سحب الكل ({available_count:,} حساب) بـ {total_price} نقطة", 
+            callback_data=f"buy_{available_count}_{total_price}_{domain}"
+        )
+    ])
+    
+    # زر الإلغاء
+    buttons_list.append([
+        InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_pull")
+    ])
+
+    await message.reply(
+        f"🎯 **الموقع المطلوب:** <code>{domain}</code>\n"
+        f"📊 **الحسابات المتوفرة:** <b>{available_count:,}</b> حساب\n"
+        f"💳 **رصيدك الحالي:** <b>{pts}</b> نقطة\n\n"
+        "اختر الكمية التي تريد سحبها من الأزرار أدناه:",
+        reply_markup=InlineKeyboardMarkup(buttons_list)
+    )
+
+@app.on_callback_query(filters.regex(r"^buy_(\d+)_(.+)_(.+)"))
+async def handle_buy_callback(client: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    is_owner_user = is_owner(user_id)
+
+    match = callback.data.split("_", 3)
+    amount_to_pull = int(match[1])
+    required_points = float(match[2])
+    domain = match[3]
+
+    pts = get_user_points(user_id)
+
+    if not is_owner_user and pts < required_points:
+        await callback.answer(f"❌ رصيدك غير كافٍ! تحتاج {required_points} نقطة.", show_alert=True)
+        return
+
+    await callback.answer("⏳ جاري بدء الاستخراج والمعالجة...")
+    status_msg = await callback.message.edit_text(
+        f"⚡ جاري استخراج <b>{amount_to_pull:,}</b> كومبو لموقع <b>{domain}</b>..."
+    )
+
     try:
         log_search_domain(domain)
     except Exception:
         pass
 
-    pts = get_user_points(user_id)
-    
-    if is_owner_user:
-        pull_limit = 1000
-        cost = 0.0
-    elif pts >= 1.0:
-        pull_limit = 1000
-        cost = 1.0
-    elif pts >= 0.5:
-        pull_limit = 500
-        cost = 0.5
-    else:
-        await message.reply(
-            f"❌ رصيدك الحالي ({pts} نقطة) غير كافٍ.\n"
-            f"تحتاج **0.5 نقطة** على الأقل لاستخراج 500 كومبو."
-        )
-        return
-
-    status_msg = await message.reply(
-        f"⚡ جاري استخراج الكومبو لموقع <b>{domain}</b>...\n"
-        f"الكمية المطلوبة: <b>{pull_limit:,}</b>"
-    )
-
     filename = None
     try:
-        results = await fetch_and_delete_combos(domain, pull_limit)
+        results = await fetch_and_delete_combos(domain, amount_to_pull)
 
         if not results:
-            await status_msg.edit_text(f"❌ لم يتم العثور على أية نتائج لموقع <b>{domain}</b>.")
-            for owner in OWNER_IDS:
-                try:
-                    await client.send_message(
-                        owner, 
-                        f"⚠️ **إشعار نفاذ:** بحث عن <code>{domain}</code> ولم توجد نتائج!"
-                    )
-                except Exception:
-                    pass
+            await status_msg.edit_text(f"❌ حدث خطأ أو تم سحب البيانات من قبل مستخدم آخر لموقع <b>{domain}</b>.")
             return
 
-        filename = f"/tmp/results_{domain}_{user_id}_{uuid.uuid4().hex[:8]}.txt"
+        fetched_count = len(results)
+
+        filename = f"results_{domain}_{user_id}_{uuid.uuid4().hex[:8]}.txt"
         with open(filename, "w", encoding="utf-8") as f:
             f.write("\n".join(results))
 
         caption = (
-            f"✅ تم استخراج <b>{len(results):,}</b> كومبو لـ <b>{domain}</b>\n"
-            f"💳 الخصم: <b>{cost}</b> نقطة"
+            f"✅ تم استخراج <b>{fetched_count:,}</b> كومبو لـ <b>{domain}</b>\n"
+            f"💳 الخصم: <b>{required_points}</b> نقطة"
         )
         
-        await message.reply_document(
+        await client.send_document(
+            chat_id=user_id,
             document=filename,
             caption=caption
         )
 
-        if not is_owner_user and cost > 0:
-            deduct_user_points(user_id, cost)
+        if not is_owner_user and required_points > 0:
+            deduct_user_points(user_id, required_points)
         
         increment_operations()
 
@@ -901,16 +1001,9 @@ async def process_domain(client: Client, message: Message):
             pass
 
     except FloodWait as e:
-        try:
-            await status_msg.edit_text(f"⏳ انتظر {e.value} ثانية بسبب FloodWait ثم حاول مرة أخرى.")
-        except Exception:
-            await message.reply(f"⏳ انتظر {e.value} ثانية بسبب FloodWait ثم حاول مرة أخرى.")
+        await client.send_message(user_id, f"⏳ انتظر {e.value} ثانية بسبب FloodWait ثم حاول مرة أخرى.")
     except Exception as e:
-        error_text = f"❌ حدث خطأ أثناء الاستخراج:\n<code>{str(e)[:300]}</code>"
-        try:
-            await status_msg.edit_text(error_text)
-        except Exception:
-            await message.reply(error_text)
+        await client.send_message(user_id, f"❌ حدث خطأ أثناء الاستخراج:\n<code>{str(e)[:300]}</code>")
         print(f"[EXTRACT ERROR] user={user_id} domain={domain} → {e}")
     finally:
         if filename and os.path.exists(filename):
@@ -919,6 +1012,12 @@ async def process_domain(client: Client, message: Message):
             except Exception:
                 pass
 
+@app.on_callback_query(filters.regex("^cancel_pull$"))
+async def cancel_pull_cb(client: Client, callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.edit_text("❌ تم إلغاء العملية.")
+
 # ==================== التشغيل ====================
-print("⚡ Bot is starting on Railway...")
+print("⚡ Bot is starting...")
 app.run()
+
