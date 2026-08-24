@@ -144,7 +144,7 @@ def save_members_points_to_file():
 
         with open(MEMBERS_EXPORT_PATH, "w", encoding="utf-8") as f:
             f.write("User ID | Points | Blocked Status | Referred By\n")
-            f.write("="*50 + "\n")
+            f.write("=" * 50 + "\n")
             for r in rows:
                 status = "Blocked" if r[2] == 1 else "Active"
                 f.write(f"{r[0]} | {r[1]} | {status} | {r[3]}\n")
@@ -273,7 +273,6 @@ async def check_subscription(client: Client, user_id: int) -> bool:
     for (ch,) in channels:
         try:
             ch_str = ch.strip()
-            # دعم كامل للـ username أو الـ chat_id الرقمي
             if ch_str.startswith("@") or not (ch_str.startswith("-") or ch_str.isdigit()):
                 chat_identifier = ch_str
             else:
@@ -281,12 +280,10 @@ async def check_subscription(client: Client, user_id: int) -> bool:
                 
             member = await client.get_chat_member(chat_identifier, user_id)
             
-            # إذا كان العضو غادر أو مطرود، يعتبر غير مشترك
             if member.status in ["left", "kicked", "banned"]:
                 return False
         except Exception as e:
             print(f"[SUB CHECK ERROR] Channel: {ch} | User: {user_id} | Error: {e}")
-            # إذا لم يتمكن البوت من جلب العضو (مثلاً البوت ليس مشرفاً في القناة)، نتجاوز الخطأ مؤقتاً لتجنب إعاقة المستخدم ظلماً، أو نعتبره غير مشترك إذا أردت أماناً كاملاً. هنا نسمح للمستخدم بالمرور إذا حدث خطأ تقني في الصلاحيات.
             continue
             
     return True
@@ -561,7 +558,7 @@ async def start_handler(client: Client, message: Message):
                     add_user_points(user_id, pts)
                     await message.reply(f"🎁 مبروك! حصلت على <b>{pts}</b> نقطة من رابط الهدية.")
             else:
-                await message.reply("❌ كود الهدية غير صالحة أو غير موجودة.")
+                await message.reply("❌ كود الهدية غير صالح أو غير موجود.")
             
         elif ref_payload.isdigit():
             referrer_id = int(ref_payload)
@@ -586,7 +583,7 @@ async def start_handler(client: Client, message: Message):
             await message.reply("⚠️ يجب عليك الاشتراك في قنوات البوت أولاً لاستخدام الخدمة!", reply_markup=markup)
             return
 
-    text = f"""اهلا بك في <b>بوت الكومبو والخدمات السريعة</b>
+    text = f"""أهلاً بك في <b>بوت الكومبو والخدمات السريعة</b>
 
 نقاطك الحالية: <b>{get_user_points(user_id)}</b>
 
@@ -750,7 +747,7 @@ async def add_channel_cmd(client: Client, message: Message):
     cursor.execute("INSERT OR REPLACE INTO channels (channel_id) VALUES (?)", (ch,))
     conn.commit()
     conn.close()
-    await message.reply(f"✅ تم إضافة القناة <code>{ch}</code> لـ الاشتراك الإجباري.")
+    await message.reply(f"✅ تم إضافة القناة <code>{ch}</code> للاشتراك الإجباري.")
 
 @app.on_message(filters.command("del_channel") & filters.user(OWNER_IDS))
 async def del_channel_cmd(client: Client, message: Message):
@@ -767,7 +764,7 @@ async def del_channel_cmd(client: Client, message: Message):
 
 @app.on_message(filters.regex("^📢 إذاعة للأعضاء$") & filters.user(OWNER_IDS))
 async def broadcast_ask(client: Client, message: Message):
-    await message.reply("📝 قم بعمل Reply على الرسالة التي تريد إذاعتها واكتب `/bc`")
+    await message.reply("📝 قم بعمل الرد (Reply) على الرسالة التي تريد إذاعتها واكتب `/bc`")
 
 @app.on_message(filters.command("bc") & filters.user(OWNER_IDS))
 async def start_broadcast(client: Client, message: Message):
@@ -802,7 +799,7 @@ async def start_broadcast(client: Client, message: Message):
         except Exception:
             failed += 1
             
-    await message.reply(f"✅ اكتملت الإذاعة!\n🟢 النجاح (النشطين): {success}\n🔴 الفشل (المحظورين): {failed}")
+    await message.reply(f"✅ اكتملت الإذاعة!\n🟢 النجاح (النشطون): {success}\n🔴 الفشل (المحظورون): {failed}")
 
 @app.on_message(filters.regex("^📈 عدد العمليات$") & filters.user(OWNER_IDS))
 async def ops_count(client: Client, message: Message):
@@ -847,7 +844,7 @@ async def clean_unused(client: Client, callback: CallbackQuery):
         deleted_total += delete_by_domain(dom)
         
     conn.close()
-    await callback.message.edit_text(f"✅ تم حذف <b>{deleted_total:,}</b> كومبو للمواقع الضعيفة الطلب.")
+    await callback.message.edit_text(f"✅ تم حذف <b>{deleted_total:,}</b> كومبو للمواقع ضعيفة الطلب.")
 
 @app.on_message(filters.regex("^✅ تفعيل البوت$") & filters.user(OWNER_IDS))
 async def enable_bot(client: Client, message: Message):
@@ -873,8 +870,8 @@ async def show_stats(client: Client, message: Message):
 
 👥 <b>إحصائيات الأعضاء:</b>
 • إجمالي المسجلين: <b>{total_users:,}</b>
-• الأعضاء النشطين: <b>{active_users:,}</b>
-• قامت بحظر البوت: <b>{blocked_users:,}</b>
+• الأعضاء النشطون: <b>{active_users:,}</b>
+• من قام بحظر البوت: <b>{blocked_users:,}</b>
 
 📦 <b>إحصائيات الكومبو:</b>
 • إجمالي الكومبوهات: <b>{total:,}</b>
