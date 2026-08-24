@@ -11,6 +11,7 @@ from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
 )
 from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
+from pyrogram.enums import ChatMemberStatus
 
 # ==================== الإعدادات ومسار التخزين ====================
 API_ID = int(os.getenv("API_ID", "20084899"))
@@ -230,6 +231,23 @@ def log_search_domain(domain: str):
     conn.close()
 
 # ==================== فحص الاشتراكات الدقيق 100% والمحدث ====================
+def make_channel_link(ch: str) -> str:
+    """توليد رابط القناة بطريقة خاصة تدعم القنوات الخاصة بالـ ID"""
+    ch_clean = ch.strip()
+    if ch_clean.startswith("@"):
+        return f"https://t.me/{ch_clean.replace('@', '')}"
+    elif ch_clean.startswith("-100"):
+        # الطريقة الخاصة للقنوات الخاصة: إزالة -100
+        pure_id = ch_clean.replace("-100", "", 1)
+        return f"https://t.me/c/{pure_id}"
+    elif ch_clean.startswith("-") or ch_clean.isdigit():
+        pure_id = ch_clean.lstrip("-")
+        if pure_id.startswith("100"):
+            pure_id = pure_id[3:]
+        return f"https://t.me/c/{pure_id}"
+    else:
+        return f"https://t.me/{ch_clean}"
+
 async def get_subscription_markup():
     conn = get_db()
     cursor = conn.cursor()
@@ -243,21 +261,20 @@ async def get_subscription_markup():
     buttons = []
     for (ch,) in channels:
         ch_clean = ch.strip()
+        ch_link = make_channel_link(ch_clean)
+        
         if ch_clean.startswith("@"):
-            ch_link = f"https://t.me/{ch_clean.replace('@', '')}"
             btn_text = f"اشتراك في القناة {ch_clean}"
-        elif ch_clean.startswith("-100") or ch_clean.isdigit() or ch_clean.startswith("-"):
-            ch_link = f"https://t.me/c/{str(ch_clean).replace('-100', '')}"
-            btn_text = "اشتراك في القناة 📢"
         else:
-            ch_link = f"https://t.me/{ch_clean}"
-            btn_text = f"اشتراك في {ch_clean}"
+            btn_text = "📢 اشتراك في القناة"
+            
         buttons.append([InlineKeyboardButton(btn_text, url=ch_link)])
         
     buttons.append([InlineKeyboardButton("🔄 تحقق من الاشتراك", callback_data="check_sub")])
     return InlineKeyboardMarkup(buttons)
 
 async def check_subscription(client: Client, user_id: int) -> bool:
+    """نظام تحقق عالمي صارم مثل البوتات المشهورة"""
     if is_owner(user_id):
         return True
     
@@ -280,11 +297,20 @@ async def check_subscription(client: Client, user_id: int) -> bool:
                 
             member = await client.get_chat_member(chat_identifier, user_id)
             
-            if member.status in ["left", "kicked", "banned"]:
-                return False
+            # دعم كل أشكال الحالة (Enum + نص)
+            status = member.status
+            if isinstance(status, ChatMemberStatus):
+                if status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+                    return False
+            else:
+                status_str = str(status).lower()
+                if status_str in ("left", "kicked", "banned"):
+                    return False
+                    
         except Exception as e:
+            # في حالة الخطأ (بوت مش أدمن أو العضو مش مشترك) → يعتبر غير مشترك
             print(f"[SUB CHECK ERROR] Channel: {ch} | User: {user_id} | Error: {e}")
-            continue
+            return False
             
     return True
 
@@ -297,8 +323,73 @@ async def verify_subscription_cb(client: Client, callback: CallbackQuery):
     else:
         await callback.answer("❌ عذراً، لم تقم بالاشتراك في جميع القنوات المطلوبة بعد!", show_alert=True)
 
+# ==================== نظام قنوات الإعلانات مع زر تحقق ====================
+async def check_single_channel(client: Client, user_id: int, channel_id: str) -> bool:
+    """فحص اشتراك في قناة واحدة فقط"""
+    try:
+        ch_str = channel_id.strip()
+        if ch_str.startswith("@") or not (ch_str.startswith("-") or ch_str.isdigit()):
+            chat_identifier = ch_str
+        else:
+            chat_identifier = int(ch_str)
+            
+        member = await client.get_chat_member(chat_identifier, user_id)
+        status = member.status
+        
+        if isinstance(status, ChatMemberStatus):
+            return status not in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED)
+        else:
+            return str(status).lower() not in ("left", "kicked", "banned")
+    except Exception as e:
+        print(f"[AD CHECK ERROR] {channel_id} | {user_id} | {e}")
+        return False
+
+@app.on_callback_query(filters.regex(r"^check_ad_(.+)$"))
+async def verify_ad_subscription_cb(client: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    channel_id = callback.data.replace("check_ad_", "", 1)
+    
+    # التحقق من أن القناة موجودة في قائمة الإعلانات
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT points_reward FROM ad_channels WHERE channel_id = ?", (channel_id,))
+    row = cursor.fetchone()
+    
+    if not row:
+        conn.close()
+        await callback.answer("❌ هذه القناة غير موجودة في قائمة الإعلانات.", show_alert=True)
+        return
+    
+    reward_pts = float(row[0])
+    
+    # هل حصل على المكافأة مسبقاً؟
+    cursor.execute("SELECT 1 FROM ad_rewards WHERE user_id = ? AND channel_id = ?", (user_id, channel_id))
+    already = cursor.fetchone()
+    if already:
+        conn.close()
+        await callback.answer("✅ لقد حصلت على نقاط هذه القناة مسبقاً.", show_alert=True)
+        return
+    
+    # فحص الاشتراك الفعلي
+    is_subscribed = await check_single_channel(client, user_id, channel_id)
+    
+    if is_subscribed:
+        add_user_points(user_id, reward_pts)
+        cursor.execute("INSERT INTO ad_rewards (user_id, channel_id) VALUES (?, ?)", (user_id, channel_id))
+        conn.commit()
+        conn.close()
+        await callback.answer(f"🎉 تم إضافة {reward_pts} نقطة بنجاح!", show_alert=True)
+        try:
+            await client.send_message(user_id, f"🎉 تم إضافة **{reward_pts}** نقطة لاشتراكك في القناة الإعلانية!")
+        except Exception:
+            pass
+    else:
+        conn.close()
+        await callback.answer("❌ لم تشترك في القناة بعد! اشترك أولاً ثم اضغط تحقق.", show_alert=True)
+
 @app.on_chat_member_updated()
 async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
+    """يبقى كدعم إضافي (اختياري) لكن النظام الرئيسي أصبح زر التحقق"""
     user_id = update.from_user.id if update.from_user else None
     if not user_id:
         return
@@ -317,13 +408,8 @@ async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
         if (not update.old_chat_member or update.old_chat_member.status in ["left", "kicked"]) and update.new_chat_member.status in ["member", "administrator", "creator"]:
             cursor.execute("SELECT 1 FROM ad_rewards WHERE user_id = ? AND channel_id = ?", (user_id, target_ch))
             if not cursor.fetchone():
-                add_user_points(user_id, reward_pts)
-                cursor.execute("INSERT INTO ad_rewards (user_id, channel_id) VALUES (?, ?)", (user_id, target_ch))
-                conn.commit()
-                try:
-                    await client.send_message(user_id, f"🎉 تم إضافة **{reward_pts}** نقطة لاشتراكك في القناة الإعلانية!")
-                except Exception:
-                    pass
+                # لا نعطي تلقائياً بعد الآن - نعتمد على زر التحقق
+                pass
         elif update.old_chat_member and update.old_chat_member.status in ["member", "administrator", "creator"] and update.new_chat_member.status in ["left", "kicked"]:
             cursor.execute("SELECT 1 FROM ad_rewards WHERE user_id = ? AND channel_id = ?", (user_id, target_ch))
             if cursor.fetchone():
@@ -629,9 +715,12 @@ async def show_ad_channels(client: Client, message: Message):
     txt = "📺 <b>اشترك في القنوات التالية للحصول على نقاط:</b>\n\n"
     btns = []
     for ch, pts in ads:
-        ch_link = f"https://t.me/{ch.replace('@', '')}" if ch.startswith("@") else ch
-        txt += f"• القناة: {ch} (المكافأة: **{pts}** نقطة)\n"
-        btns.append([InlineKeyboardButton(f"الانضمام إلى {ch} (+{pts} نقطة)", url=ch_link)])
+        ch_link = make_channel_link(ch)
+        txt += f"• القناة: <code>{ch}</code> (المكافأة: **{pts}** نقطة)\n"
+        btns.append([
+            InlineKeyboardButton(f"🔗 انضم (+{pts})", url=ch_link),
+            InlineKeyboardButton("✅ تحقق واحصل على النقاط", callback_data=f"check_ad_{ch}")
+        ])
         
     await message.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
@@ -664,15 +753,24 @@ async def set_ref_pts_cmd(client: Client, message: Message):
 
 @app.on_message(filters.regex("^📢 إضافة إعلان قناة$") & filters.user(OWNER_IDS))
 async def add_ad_info(client: Client, message: Message):
-    await message.reply("📝 لإضافة قناة إعلانية مع نقاط مكافأة، استخدم الأمر:\n`/add_ad @channel 2`")
+    await message.reply(
+        "📝 لإضافة قناة إعلانية مع نقاط مكافأة، استخدم الأمر:\n"
+        "`/add_ad @channel 2`\n"
+        "أو بالـ ID (قنوات خاصة):\n"
+        "`/add_ad -1003434964850 2`"
+    )
 
 @app.on_message(filters.command("add_ad") & filters.user(OWNER_IDS))
 async def add_ad_cmd(client: Client, message: Message):
     if len(message.command) < 3:
-        await message.reply("❌ الصيغة خاطئة! استخدم:\n`/add_ad @channel_username POINTS`")
+        await message.reply("❌ الصيغة خاطئة! استخدم:\n`/add_ad @channel_username POINTS`\nأو\n`/add_ad -100xxxxxxxxxx POINTS`")
         return
     ch = message.command[1]
-    pts = float(message.command[2])
+    try:
+        pts = float(message.command[2])
+    except ValueError:
+        await message.reply("❌ النقاط يجب أن تكون رقماً.")
+        return
     
     conn = get_db()
     cursor = conn.cursor()
@@ -732,14 +830,14 @@ async def channel_settings(client: Client, message: Message):
     else:
         txt += "لا توجد قنوات إجبارية مضافة حالياً.\n"
         
-    txt += "\n➕ لإضافة قناة استخدم: `/add_channel @username`\n"
-    txt += "🗑 لإزالة قناة استخدم: `/del_channel @username`"
+    txt += "\n➕ لإضافة قناة استخدم:\n`/add_channel @username`\nأو\n`/add_channel -1003434964850`\n"
+    txt += "🗑 لإزالة قناة استخدم: `/del_channel @username` أو `/del_channel -100...`"
     await message.reply(txt)
 
 @app.on_message(filters.command("add_channel") & filters.user(OWNER_IDS))
 async def add_channel_cmd(client: Client, message: Message):
     if len(message.command) < 2:
-        await message.reply("❌ يرجى كتابة أيدي أو يوزر القناة!")
+        await message.reply("❌ يرجى كتابة أيدي أو يوزر القناة!\nمثال: `/add_channel -1003434964850`")
         return
     ch = message.command[1]
     conn = get_db()
@@ -747,7 +845,7 @@ async def add_channel_cmd(client: Client, message: Message):
     cursor.execute("INSERT OR REPLACE INTO channels (channel_id) VALUES (?)", (ch,))
     conn.commit()
     conn.close()
-    await message.reply(f"✅ تم إضافة القناة <code>{ch}</code> للاشتراك الإجباري.")
+    await message.reply(f"✅ تم إضافة القناة <code>{ch}</code> للاشتراك الإجباري.\nالرابط المولّد: {make_channel_link(ch)}")
 
 @app.on_message(filters.command("del_channel") & filters.user(OWNER_IDS))
 async def del_channel_cmd(client: Client, message: Message):
@@ -955,7 +1053,7 @@ async def ask_domain(client: Client, message: Message):
     user_action_state[user_id] = "awaiting_search_domain"
     await message.reply("📝 أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:")
 
-@app.on_message(filters.text & ~filters.command(["start", "bc", "add_ad", "make_gift", "send_pts", "add_channel", "del_channel", "set_ref_points"]))
+@app.on_message(filters.text & \~filters.command(["start", "bc", "add_ad", "make_gift", "send_pts", "add_channel", "del_channel", "set_ref_points"]))
 async def process_domain_input(client: Client, message: Message):
     user_id = message.from_user.id
     
