@@ -26,17 +26,12 @@ OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").spl
 PRIVATE_CHANNEL_ID = "-1003434964850"
 PRIVATE_CHANNEL_LINK = "https://t.me/+91X31VNWIU1iNDM8"
 
-if os.path.exists("/storage/emulated/0/"):
-    BASE_DIR = "/storage/emulated/0/combo-bot"
-else:
-    BASE_DIR = os.path.join(os.getcwd(), "combo_data")
-
+# القاعدة والملفات الصغيرة فقط تبقى على الاستضافة، أما الكومبو فيدخل مباشرة لقاعدة البيانات
+BASE_DIR = os.path.join(os.getcwd(), "combo_data")
 DB_PATH = os.path.join(BASE_DIR, "combos.db")
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploaded_ulp")
 MEMBERS_EXPORT_PATH = os.path.join(BASE_DIR, "users_points.txt")
 
 os.makedirs(BASE_DIR, exist_ok=True)
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 bot_enabled_for_users = True
 user_action_state = {}
@@ -439,7 +434,8 @@ async def fetch_and_delete_combos(domain: str, limit_count: int) -> list:
 
     return await asyncio.to_thread(_db_op)
 
-def add_combos_from_file(file_path: str) -> int:
+# دالة قراءة الملف مباشرة وإدخاله لقاعدة البيانات دون حفظه على القرص نهائياً
+def add_combos_from_stream(file_path: str) -> int:
     conn = get_db()
     cursor = conn.cursor()
     added = 0
@@ -995,28 +991,41 @@ async def ask_domain_delete(client: Client, message: Message):
 
 @app.on_message(filters.regex("^📤 رفع ملف ULP$") & filters.user(OWNER_IDS))
 async def ask_file(client: Client, message: Message):
-    await message.reply("📤 أرسل ملفات الـ <b>ULP</b> الآن لمعالجتها وإضافتها للكومبو...")
+    await message.reply("📤 أرسل ملفات الـ <b>ULP</b> الآن للمعالجتها مباشرة دون حفظها على الاستضافة...")
 
+# التعديل الجذري: تحميل الملف مؤقتاً ومعالجته فوراً وحذفه كي لا يستهلك مساحة الاستضافة
 @app.on_message(filters.document & filters.user(OWNER_IDS))
 async def handle_large_document(client: Client, message: Message):
+    temp_file_path = None
     try:
         file_name = message.document.file_name or "unknown.txt"
         file_size = message.document.file_size or 0
-        saved_file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex[:6]}_{file_name}")
+        temp_file_path = f"temp_{uuid.uuid4().hex[:6]}_{file_name}"
 
-        msg = await message.reply(f"⏳ جاري تحميل وحفظ الملف: <b>{file_name}</b> ({file_size / 1024 / 1024:.2f} MB)...")
-        await message.download(file_name=saved_file_path)
+        msg = await message.reply(f"⏳ جاري استقبال الملف: <b>{file_name}</b> ({file_size / 1024 / 1024:.2f} MB)...")
+        
+        # تنزيل الملف مؤقتاً في المسار المحلي لمعالجته
+        await message.download(file_name=temp_file_path)
 
-        await msg.edit_text("⏳ جاري معالجة الترميز وإضافة الكومبوهات إلى قاعدة البيانات...")
-        added = add_combos_from_file(saved_file_path)
+        await msg.edit_text("⏳ جاري إدخال الكومبوهات إلى قاعدة البيانات وحذف الملف من القرص...")
+        
+        # معالجة الملف وإدخاله سريعا
+        added = await asyncio.to_thread(add_combos_from_stream, temp_file_path)
 
         await msg.edit_text(
-            f"✅ تم رفع ومعالجة الملف بنجاح!\n\n"
+            f"✅ تم رفع ومعالجة الملف بنجاح وتم تنظيف مساحة الاستضافة!\n\n"
             f"📁 اسم الملف: <b>{file_name}</b>\n"
             f"➕ عدد الكومبو المضاف: <b>{added:,}</b>"
         )
     except Exception as e:
         await message.reply(f"❌ حصل خطأ أثناء رفع الملف:\n<code>{str(e)}</code>")
+    finally:
+        # ضمان حذف الملف المؤقت فوراً لكي تظل مساحة الاستضافة فارغة تماماً
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except Exception:
+                pass
 
 def calculate_dynamic_price(count: int, is_owner_user: bool) -> float:
     if is_owner_user:
@@ -1044,7 +1053,6 @@ async def ask_domain(client: Client, message: Message):
     await message.reply("📝 أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:")
 
 @app.on_message(filters.text & ~filters.command(["start", "bc", "add_ad", "make_gift", "send_pts", "add_channel", "del_channel", "set_ref_points"]))
-
 async def process_domain_input(client: Client, message: Message):
     user_id = message.from_user.id
     
@@ -1220,3 +1228,4 @@ async def cancel_pull_cb(client: Client, callback: CallbackQuery):
 
 print("⚡ Bot is starting...")
 app.run()
+
