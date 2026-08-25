@@ -272,7 +272,6 @@ async def is_user_in_channel(client: Client, user_id: int, channel_id: str) -> b
         member = await client.get_chat_member(chat_id, user_id)
         status = member.status
         
-        # الحالات الصحيحة التي تعتبر العضو مشتركاً
         valid_statuses = {"creator", "administrator", "member"}
         if status in valid_statuses:
             return True
@@ -399,7 +398,7 @@ async def fetch_and_delete_combos(domain: str, limit_count: int) -> list:
             query = f"%{domain.lower()}%"
             
             # جلب عدد كافٍ مع الأخذ بعين الاعتبار التكرار والتنظيف لضمان اكتمال العدد المطلوب بالتمام والكمال
-            fetch_limit = int(limit_count * 1.5) + 100
+            fetch_limit = int(limit_count * 1.8) + 500
             cursor.execute(
                 "SELECT id, combo FROM combos WHERE LOWER(combo) LIKE ? LIMIT ?",
                 (query, fetch_limit)
@@ -522,7 +521,7 @@ def delete_by_domain(domain: str) -> int:
     conn.close()
     return count
 
-# ==================== الكيبوردات (مع إخفاء زر ULP عن الأعضاء) ====================
+# ==================== الكيبوردات (زر ULP مخفي تماماً عن الأعضاء) ====================
 def owner_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("🔍 بحث عن دومين"), KeyboardButton("📂 فرز ملفات ULP")],
@@ -677,20 +676,20 @@ async def force_sub_guard(client: Client, message: Message) -> bool:
 async def stop_ulp_feature(client: Client, message: Message):
     global ulp_feature_enabled
     ulp_feature_enabled = False
-    await message.reply("🛑 تم إيقاف قسم فرز ملفات ULP بنجاح. لن يستجيب لأي طلبات فرز حالياً.")
+    await message.reply("🛑 تم إيقاف قسم فرز ملفات ULP بنجاح.")
 
 @app.on_message(filters.command("on") & filters.user(OWNER_IDS))
 async def on_ulp_feature(client: Client, message: Message):
     global ulp_feature_enabled
     ulp_feature_enabled = True
-    await message.reply("✅ تم تفعيل قسم فرز ملفات ULP بنجاح وعاد للعمل.")
+    await message.reply("✅ تم تفعيل قسم فرز ملفات ULP بنجاح.")
 
-# ==================== قسم فرز ملفات ULP (للمالك فقط) ====================
+# ==================== قسم فرز ملفات ULP (حصري للمالك فقط) ====================
 @app.on_message(filters.regex("^📂 فرز ملفات ULP$") & filters.user(OWNER_IDS))
 async def start_ulp_filter(client: Client, message: Message):
     global ulp_feature_enabled
     if not ulp_feature_enabled:
-        await message.reply("⚠️ قسم فرز ملفات ULP متوقف حالياً من قبل المالك.")
+        await message.reply("⚠️ قسم فرز ملفات ULP متوقف حالياً من قبل المالك. أرسل `/on` لتفعيله.")
         return
 
     user_id = message.from_user.id
@@ -703,7 +702,7 @@ async def start_ulp_filter(client: Client, message: Message):
     await message.reply(
         "🎯 **قسم فرز ملفات ULP المستهدفة**\n\n"
         "أرسل الكلمات المفتاحية أو اسم الدومين/الخدمة التي تريد استخراجها من الملف.\n"
-        "يمكنك إرسال كلمة واحدة أو عدة كلمات تفصل بينها بفارزة `,` (مثال: `ludo, bandainamcoid.com`):",
+        "يمكنك إرسال كلمة واحدة أو عدة كلمات تفصل بينها بفارزة `,` (مثال: `ludo, netflix`):",
         reply_markup=cancel_kb
     )
 
@@ -719,13 +718,13 @@ async def cancel_ulp_filter_cb(client: Client, callback: CallbackQuery):
 async def process_ulp_document_filter(client: Client, message: Message):
     user_id = message.from_user.id
     
-    # حالة رفع ملفات للكومبو (للمالك)
-    if is_owner(user_id) and user_action_state.get(user_id) == "awaiting_ulp_upload":
-        await handle_large_document(client, message)
+    # حراسة مطلقة: منع أي مستخدم عادي من إرسال أو معالجة ملفات ULP أو رفعها للفرز
+    if not is_owner(user_id):
         return
 
-    # للفرز: مخصص للمالك فقط
-    if not is_owner(user_id):
+    # حالة رفع ملفات للكومبو العادي (للمالك)
+    if user_action_state.get(user_id) == "awaiting_ulp_upload":
+        await handle_large_document(client, message)
         return
 
     global ulp_feature_enabled
@@ -748,7 +747,7 @@ async def process_ulp_document_filter(client: Client, message: Message):
         msg = await message.reply(f"⏳ جاري تنزيل ملف الـ ULP: <b>{file_name}</b>...")
 
         saved_ulp_path = await client.download_media(message)
-        await msg.edit_text("🔍 تم تنزيل الملف.. جاري قراءة البيانات والتصفية بسرعة...")
+        await msg.edit_text("🔍 تم تنزيل الملف.. جاري قراءة البيانات والتصفية...")
 
         filtered_lines = []
         seen = set()
@@ -1159,7 +1158,7 @@ async def ask_file(client: Client, message: Message):
     user_action_state[message.from_user.id] = "awaiting_ulp_upload"
     await message.reply(
         "📤 **وضع رفع ملفات الكومبو مفعّل الآن!**\n\n"
-        "أرسل ملفاً واحداً أو مجموعة ملفات دفعة واحدة وسيقوم البوت بمعالجتها وإضافتها لقاعدة البيانات بالتوالي."
+        "أرسل ملفاً واحداً أو مجموعة ملفات وسيقوم البوت بمعالجتها وإضافتها لقاعدة البيانات."
     )
 
 async def handle_large_document(client: Client, message: Message):
@@ -1198,6 +1197,10 @@ async def process_text_inputs(client: Client, message: Message):
     text_input = message.text.strip()
 
     if user_action_state.get(user_id) == "awaiting_filter_keywords":
+        if not is_owner(user_id):
+            user_action_state.pop(user_id, None)
+            return
+
         global ulp_feature_enabled
         if not ulp_feature_enabled:
             user_action_state.pop(user_id, None)
@@ -1207,7 +1210,7 @@ async def process_text_inputs(client: Client, message: Message):
         user_action_state.pop(user_id, None)
         raw_keys = [k.strip().lower() for k in re.split(r'[,||\n]', text_input) if k.strip()]
         if not raw_keys:
-            await message.reply("❌ لم تقم بإدخال كلمات صحيحة! جرب مجدداً الضغط على زر فرز ملفات ULP.")
+            await message.reply("❌ لم تقم بإدخال كلمات صحيحة!")
             return
         
         user_filter_keywords[user_id] = raw_keys
@@ -1219,7 +1222,7 @@ async def process_text_inputs(client: Client, message: Message):
         
         await message.reply(
             f"✅ **تم اعتماد الكلمات المستهدفة بنجاح:**\n{kw_formatted}\n\n"
-            f"📥 **أرسل ملف ULP الآن** وسيتم فرزه حالياً وتسليمك النتائج ثم حذفه تلقائياً.",
+            f"📥 **أرسل ملف ULP الآن** وسيتم فرزه وتسليمك النتائج.",
             reply_markup=cancel_kb
         )
         return
@@ -1363,5 +1366,5 @@ async def cancel_pull_cb(client: Client, callback: CallbackQuery):
 
 # ==================== التشغيل ====================
 if __name__ == "__main__":
-    print("⚡ البوت يعمل الآن بنجاح ومستعد للاستجابة...")
+    print("⚡ البوت يعمل الآن بكامل الميزات والأمان...")
     app.run()
