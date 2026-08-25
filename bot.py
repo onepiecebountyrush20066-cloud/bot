@@ -20,8 +20,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8839466034:AAF_ONFjOcoOSrcQtiTRrtWlTQJCDtR-C
 
 OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").split(",") if x.strip()]
 DB_PATH = os.getenv("DB_PATH", "combos.db")
+
 bot_enabled_for_users = True
-ulp_feature_enabled = True  # متغير حالة تفعيل أو إيقاف قسم فرز ملفات ULP
+ulp_feature_enabled = False  # الفرز طافي افتراضياً ولا يعمل إلا بعد إرسال /on
 
 user_action_state = {}
 user_filter_keywords = {}
@@ -674,12 +675,12 @@ async def on_ulp_feature(client: Client, message: Message):
 # ==================== قسم فرز ملفات ULP ====================
 @app.on_message(filters.regex("^📂 فرز ملفات ULP$"))
 async def start_ulp_filter(client: Client, message: Message):
-    if not await force_sub_guard(client, message):
-        return
-    
     global ulp_feature_enabled
-    if not ulp_feature_enabled and not is_owner(message.from_user.id):
+    if not ulp_feature_enabled:
         await message.reply("⚠️ قسم فرز ملفات ULP متوقف حالياً من قبل المالك.")
+        return
+
+    if not await force_sub_guard(client, message):
         return
 
     user_id = message.from_user.id
@@ -694,16 +695,18 @@ async def start_ulp_filter(client: Client, message: Message):
 async def process_ulp_document_filter(client: Client, message: Message):
     user_id = message.from_user.id
     
+    # حالة رفع ملفات للكومبو (للمالك) - مع دعم رفع دفعة ملفات
     if is_owner(user_id) and user_action_state.get(user_id) == "awaiting_ulp_upload":
         await handle_large_document(client, message)
         return
 
+    # للفرز: يجب أن يكون زر الفرز مفعلاً من قبل المالك بواسطة /on
+    global ulp_feature_enabled
+    if not ulp_feature_enabled:
+        return  # لا يقوم بأي رد أو فرز إطلاقاً إذا كان متوقفاً
+
     if not await force_sub_guard(client, message):
         return
-
-    global ulp_feature_enabled
-    if not ulp_feature_enabled and not is_owner(user_id):
-        return  # يتجاهل الملفات كلياً إذا كان متوقفاً للأعضاء
 
     keywords = user_filter_keywords.get(user_id)
     if not keywords:
@@ -1125,11 +1128,14 @@ async def ask_domain_delete(client: Client, message: Message):
 @app.on_message(filters.regex("^📤 رفع ملف ULP$") & filters.user(OWNER_IDS))
 async def ask_file(client: Client, message: Message):
     user_action_state[message.from_user.id] = "awaiting_ulp_upload"
-    await message.reply("📤 أرسل ملفات الـ <b>ULP</b> الآن لمعالجتها وإضافتها للكومبو...")
+    await message.reply(
+        "📤 **وضع رفع ملفات الكومبو مفعّل الآن!**\n\n"
+        "أرسل ملفاً واحداً أو مجموعة ملفات دفعة واحدة وسيقوم البوت بمعالجتها وإضافتها لقاعدة البيانات بالتوالي."
+    )
 
 async def handle_large_document(client: Client, message: Message):
     user_id = message.from_user.id
-    user_action_state.pop(user_id, None)
+    # عدم إلغاء حالة التلقيuser_action_state لكي يتيح رفع دفعة كاملة
     try:
         file_name = message.document.file_name or "unknown.txt"
         file_size = message.document.file_size or 0
@@ -1139,7 +1145,7 @@ async def handle_large_document(client: Client, message: Message):
         temp_path = await message.download(file_name=f"temp_{message.id}_{safe_name}")
 
         await msg.edit_text("⏳ جاري معالجة الترميز وإضافة الكومبوهات إلى قاعدة البيانات...")
-        added = add_combos_from_file(temp_path)
+        added = await asyncio.to_thread(add_combos_from_file, temp_path)
         
         try: os.remove(temp_path)
         except Exception: pass
@@ -1165,7 +1171,7 @@ async def process_text_inputs(client: Client, message: Message):
 
     if user_action_state.get(user_id) == "awaiting_filter_keywords":
         global ulp_feature_enabled
-        if not ulp_feature_enabled and not is_owner(user_id):
+        if not ulp_feature_enabled:
             user_action_state.pop(user_id, None)
             await message.reply("⚠️ قسم فرز ملفات ULP متوقف حالياً.")
             return
