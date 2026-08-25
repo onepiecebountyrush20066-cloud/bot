@@ -685,11 +685,25 @@ async def start_ulp_filter(client: Client, message: Message):
 
     user_id = message.from_user.id
     user_action_state[user_id] = "awaiting_filter_keywords"
+    
+    cancel_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_ulp_filter")]
+    ])
+    
     await message.reply(
         "🎯 **قسم فرز ملفات ULP المستهدفة**\n\n"
         "أرسل الكلمات المفتاحية أو اسم الدومين/الخدمة التي تريد استخراجها من الملف.\n"
-        "يمكنك إرسال كلمة واحدة أو عدة كلمات تفصل بينها بفارزة `,` (مثال: `ludo, bandainamcoid.com`):"
+        "يمكنك إرسال كلمة واحدة أو عدة كلمات تفصل بينها بفارزة `,` (مثال: `ludo, bandainamcoid.com`):",
+        reply_markup=cancel_kb
     )
+
+@app.on_callback_query(filters.regex("^cancel_ulp_filter$"))
+async def cancel_ulp_filter_cb(client: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_action_state.pop(user_id, None)
+    user_filter_keywords.pop(user_id, None)
+    await callback.answer("تم إلغاء عملية الفرز.", show_alert=False)
+    await callback.message.edit_text("❌ تم إلغاء عملية فرز ULP.")
 
 @app.on_message(filters.document)
 async def process_ulp_document_filter(client: Client, message: Message):
@@ -717,6 +731,8 @@ async def process_ulp_document_filter(client: Client, message: Message):
         return
 
     saved_ulp_path = None
+    output_filename = None
+
     try:
         file_name = message.document.file_name or "data.ulp"
         msg = await message.reply(f"⏳ جاري تنزيل ملف الـ ULP: <b>{file_name}</b>...")
@@ -724,41 +740,40 @@ async def process_ulp_document_filter(client: Client, message: Message):
         saved_ulp_path = await client.download_media(message)
         await msg.edit_text("🔍 تم تنزيل الملف.. جاري قراءة البيانات والتصفية بسرعة...")
 
-        content = ""
-        for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'utf-16']:
-            try:
-                with open(saved_ulp_path, 'r', encoding=enc, errors='ignore') as f:
-                    content = f.read()
-                if content:
-                    break
-            except Exception:
-                continue
-
-        lines = content.splitlines()
         filtered_lines = []
         seen = set()
 
-        for line in lines:
-            line_str = line.strip()
-            line_lower = line_str.lower()
-            if line_str and any(key in line_lower for key in keywords):
-                cleaned = extract_email_pass(line_str)
-                if cleaned not in seen:
-                    seen.add(cleaned)
-                    filtered_lines.append(cleaned)
+        encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'utf-16']
+        for enc in encodings:
+            try:
+                with open(saved_ulp_path, 'r', encoding=enc, errors='ignore') as f:
+                    for line in f:
+                        line_str = line.strip()
+                        line_lower = line_str.lower()
+                        if line_str and any(key in line_lower for key in keywords):
+                            cleaned = extract_email_pass(line_str)
+                            if cleaned not in seen:
+                                seen.add(cleaned)
+                                filtered_lines.append(cleaned)
+                break
+            except Exception:
+                continue
 
         if not filtered_lines:
             await msg.edit_text("❌ لم يتم العثور على أية نتائج تطابق الكلمات والمواقع المفتاحية المحددة في هذا الملف!")
         else:
+            await msg.edit_text("📤 جاري تجهيز وإرسال ملف النتائج المفروز...")
+            
             output_filename = f"Filtered_{os.path.splitext(file_name)[0]}.txt"
-            file_buffer = io.BytesIO("\n".join(filtered_lines).encode('utf-8'))
-            file_buffer.name = output_filename
+            with open(output_filename, "w", encoding="utf-8") as out_f:
+                out_f.write("\n".join(filtered_lines))
 
-            await msg.edit_text("📤 جاري رفع ملف النتائج المفروز...")
             kw_text = ", ".join([f"`{k}`" for k in keywords])
+            
+            # إرسال الملف المفروز للمستخدم
             await client.send_document(
                 chat_id=message.chat.id,
-                document=file_buffer,
+                document=output_filename,
                 caption=(
                     f"✅ **تم اكتمال عملية الفرز بنجاح!**\n\n"
                     f"📄 الملف الأصلي: <code>{file_name}</code>\n"
@@ -772,11 +787,23 @@ async def process_ulp_document_filter(client: Client, message: Message):
         await message.reply(f"❌ حدث خطأ أثناء عملية الفرز:\n<code>{str(e)}</code>")
 
     finally:
+        # 1. حذف الملف الأصلي المرفوع نهائياً من ذاكرة السيرفر
         if saved_ulp_path and os.path.exists(saved_ulp_path):
             try:
                 os.remove(saved_ulp_path)
             except Exception:
                 pass
+
+        # 2. حذف الملف المفروز الناتج نهائياً من ذاكرة السيرفر
+        if output_filename and os.path.exists(output_filename):
+            try:
+                os.remove(output_filename)
+            except Exception:
+                pass
+
+        # إعادة إنهاء حالة المعالجة للمستخدم
+        user_filter_keywords.pop(user_id, None)
+        user_action_state.pop(user_id, None)
 
 # ==================== أوامر الأعضاء والمالك ====================
 @app.on_message(filters.regex("^💰 رصيدي ونقاطي$"))
@@ -1135,7 +1162,6 @@ async def ask_file(client: Client, message: Message):
 
 async def handle_large_document(client: Client, message: Message):
     user_id = message.from_user.id
-    # عدم إلغاء حالة التلقيuser_action_state لكي يتيح رفع دفعة كاملة
     try:
         file_name = message.document.file_name or "unknown.txt"
         file_size = message.document.file_size or 0
@@ -1184,9 +1210,15 @@ async def process_text_inputs(client: Client, message: Message):
         
         user_filter_keywords[user_id] = raw_keys
         kw_formatted = ", ".join([f"<code>{k}</code>" for k in raw_keys])
+        
+        cancel_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_ulp_filter")]
+        ])
+        
         await message.reply(
             f"✅ **تم اعتماد الكلمات المستهدفة بنجاح:**\n{kw_formatted}\n\n"
-            f"📥 **أرسل ملف ULP الآن** وسيتم حفظه وفرزه فوراً وتسليمك النتائج."
+            f"📥 **أرسل ملف ULP الآن** وسيتم فرزه حلياً وتسليمك النتائج ثم حذفه تلقائياً.",
+            reply_markup=cancel_kb
         )
         return
 
