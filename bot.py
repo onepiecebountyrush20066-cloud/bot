@@ -1,4 +1,3 @@
-
 import os
 import io
 import re
@@ -304,7 +303,6 @@ async def is_user_in_channel(client: Client, user_id: int, channel_id: str) -> b
         return False
 
 async def check_subscription(client: Client, user_id: int) -> tuple:
-    """ترجع (True, []) إذا كان مسموحاً، أو (False, missing_list)"""
     if is_owner(user_id):
         return True, []
     
@@ -544,6 +542,17 @@ def delete_by_domain(domain: str) -> int:
     conn.close()
     return count
 
+def get_top_points_users(limit: int = 20):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id, points FROM users WHERE points > 0 ORDER BY points DESC LIMIT ?",
+        (limit,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
 # ==================== الكيبوردات ====================
 def owner_keyboard():
     return ReplyKeyboardMarkup([
@@ -555,7 +564,8 @@ def owner_keyboard():
         [KeyboardButton("🔥 الأكثر والأقل طلباً"), KeyboardButton("🎁 إنشاء رابط هدية")],
         [KeyboardButton("➕ إرسال نقاط ID"), KeyboardButton("⚙️ نقاط الإحالة")],
         [KeyboardButton("📢 إضافة إعلان قناة"), KeyboardButton("🧾 قناة السجل (Audit Log)")],
-        [KeyboardButton("💣 حذف كل البيانات"), KeyboardButton("📈 حالة البوت")]
+        [KeyboardButton("💎 إحصائيات النقاط"), KeyboardButton("💣 حذف كل البيانات")],
+        [KeyboardButton("📈 حالة البوت")]
     ], resize_keyboard=True)
 
 def user_keyboard():
@@ -725,7 +735,7 @@ async def start_ulp_filter(client: Client, message: Message):
     await message.reply(
         "🎯 **قسم فرز ملفات ULP المستهدفة**\n\n"
         "أرسل الكلمات المفتاحية أو اسم الدومين/الخدمة التي تريد استخراجها من الملف.\n"
-        "يمكنك إرسال كلمة واحدة أو عدة كلمات تفصل بينها بفارزة `,` (مثال: `ludo, netflix`):",
+        "يمكنك إرسال كلمة واحدة أو عدة كلمات تفصل بينها بفارزة `,` (مثال: `ludo, netflix, expressvpn`):",
         reply_markup=cancel_kb
     )
 
@@ -772,22 +782,31 @@ async def process_ulp_document_filter(client: Client, message: Message):
 
         filtered_lines = []
         seen = set()
+        keywords_lower = [k.lower().strip() for k in keywords if k.strip()]
 
         encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'utf-16']
+        file_read_ok = False
         for enc in encodings:
             try:
                 with open(saved_ulp_path, 'r', encoding=enc, errors='ignore') as f:
                     for line in f:
                         line_str = line.strip()
+                        if not line_str:
+                            continue
                         line_lower = line_str.lower()
-                        if line_str and any(key in line_lower for key in keywords):
+                        if any(key in line_lower for key in keywords_lower):
                             cleaned = extract_email_pass(line_str)
-                            if cleaned not in seen:
+                            if cleaned and cleaned not in seen:
                                 seen.add(cleaned)
                                 filtered_lines.append(cleaned)
+                file_read_ok = True
                 break
             except Exception:
                 continue
+
+        if not file_read_ok:
+            await msg.edit_text("❌ فشل قراءة الملف. جرب ترميز آخر أو تأكد من صيغة الملف.")
+            return
 
         if not filtered_lines:
             await msg.edit_text("❌ لم يتم العثور على أية نتائج تطابق الكلمات والمواقع المفتاحية المحددة في هذا الملف!")
@@ -968,7 +987,7 @@ async def process_send_pts(client: Client, message: Message):
     add_user_points(target_id, pts)
     await message.reply(f"✅ تم إضافة <b>{pts}</b> نقطة للمستخدم <code>{target_id}</code> بنجاح.")
 
-# ==================== إعدادات الاشتراك الإجباري (محدثة) ====================
+# ==================== إعدادات الاشتراك الإجباري ====================
 @app.on_message(filters.regex("^⚙️ إعدادات الاشتراك$") & filters.user(OWNER_IDS))
 async def channel_settings(client: Client, message: Message):
     channels = get_forced_channels()
@@ -1165,6 +1184,20 @@ async def show_stats(client: Client, message: Message):
     else: text += "لا توجد بيانات كافية.\n"
     await message.reply(text)
 
+@app.on_message(filters.regex("^💎 إحصائيات النقاط$") & filters.user(OWNER_IDS))
+async def points_stats(client: Client, message: Message):
+    top_users = get_top_points_users(20)
+    if not top_users:
+        await message.reply("📊 لا يوجد أعضاء لديهم نقاط حالياً.")
+        return
+
+    text = "💎 <b>إحصائيات النقاط - أكثر الأعضاء نقاطاً:</b>\n\n"
+    for i, (uid, pts) in enumerate(top_users, 1):
+        text += f"{i}. <code>{uid}</code> → <b>{pts}</b> نقطة\n"
+    
+    text += f"\n📌 يتم عرض أعلى {len(top_users)} عضو."
+    await message.reply(text)
+
 @app.on_message(filters.regex("^💣 حذف كل البيانات$") & filters.user(OWNER_IDS))
 async def confirm_delete_all(client: Client, message: Message):
     buttons = InlineKeyboardMarkup([
@@ -1229,8 +1262,12 @@ async def ask_domain(client: Client, message: Message):
     user_action_state[user_id] = "awaiting_search_domain"
     await message.reply("📝 أرسل اسم الموقع أو اللعبة الذي تريد البحث عنه الآن:")
 
-@app.on_message(filters.text & ~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺)"))
-
+@app.on_message(
+    filters.text
+    & ~filters.regex(
+        r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺|💎)"
+    )
+)
 async def process_text_inputs(client: Client, message: Message):
     user_id = message.from_user.id
     text_input = message.text.strip()
@@ -1246,164 +1283,145 @@ async def process_text_inputs(client: Client, message: Message):
             await message.reply("⚠️ قسم فرز ملفات ULP متوقف حالياً.")
             return
 
-        user_action_state.pop(user_id, None)
-        raw_keys = [k.strip().lower() for k in re.split(r'[,||\n]', text_input) if k.strip()]
+        raw_keys = [k.strip().lower() for k in re.split(r'[,|\n]', text_input) if k.strip()]
         if not raw_keys:
-            await message.reply("❌ لم تقم بإدخال كلمات صحيحة!")
+            await message.reply("❌ لم تقم بإدخال كلمات صحيحة. حاول مجدداً:")
             return
-        
+
         user_filter_keywords[user_id] = raw_keys
-        kw_formatted = ", ".join([f"<code>{k}</code>" for k in raw_keys])
+        user_action_state[user_id] = "awaiting_ulp_file"
         
-        cancel_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_ulp_filter")]
-        ])
-        
+        kw_str = ", ".join([f"`{k}`" for k in raw_keys])
         await message.reply(
-            f"✅ **تم اعتماد الكلمات المستهدفة بنجاح:**\n{kw_formatted}\n\n"
-            f"📥 **أرسل ملف ULP الآن** وسيتم فرزه وتسليمك النتائج.",
-            reply_markup=cancel_kb
+            f"✅ **تم تسجيل الكلمات المفتاحية بنجاح:** {kw_str}\n\n"
+            f"📂 **الخطوة التالية:** أرسل الآن ملف الـ ULP (TXT أو غيره) ليتم فرزه استناداً لهذه الكلمات."
         )
         return
 
-    if user_action_state.get(user_id) == "awaiting_domain_delete" and is_owner(user_id):
+    if user_action_state.get(user_id) == "awaiting_domain_delete":
         user_action_state.pop(user_id, None)
-        try:
-            deleted = await asyncio.to_thread(delete_by_domain, text_input.lower())
-            await message.reply(f"✅ تم حذف <b>{deleted:,}</b> كومبو متعلق بـ <b>{text_input}</b>")
-        except Exception as e:
-            await message.reply(f"❌ فشل الحذف: <code>{e}</code>")
+        if not is_owner(user_id):
+            return
+        msg = await message.reply(f"🗑 جاري حذف الكومبوهات الخاصة بالدومين: `{text_input}`...")
+        deleted_count = delete_by_domain(text_input)
+        await msg.edit_text(f"✅ تم حذف <b>{deleted_count:,}</b> كومبو يتبع للدومين: `{text_input}` بنجاح.")
         return
 
-    user_action_state.pop(user_id, None)
+    if user_action_state.get(user_id) == "awaiting_search_domain":
+        user_action_state.pop(user_id, None)
+        domain = text_input.lower()
 
-    domain = text_input.lower()
-    if len(domain) < 2:
-        return
+        if not is_owner(user_id):
+            if not await force_sub_guard(client, message):
+                return
 
-    is_owner_user = is_owner(user_id)
-    if not is_owner_user:
-        if not await force_sub_guard(client, message):
+        msg = await message.reply(f"🔍 جاري البحث عن حسابات الدومين: <code>{domain}</code>...")
+        available = count_available_combos(domain)
+
+        if available == 0:
+            await msg.edit_text(f"❌ عذراً، لا توجد أي حسابات متوفرة حالياً للدومين: <code>{domain}</code>.")
             return
 
-    available_count = await asyncio.to_thread(count_available_combos, domain)
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("100", callback_data=f"get_{domain}_100"),
+                InlineKeyboardButton("500", callback_data=f"get_{domain}_500"),
+                InlineKeyboardButton("1000", callback_data=f"get_{domain}_1000")
+            ],
+            [
+                InlineKeyboardButton("2500", callback_data=f"get_{domain}_2500"),
+                InlineKeyboardButton("5000", callback_data=f"get_{domain}_5000"),
+                InlineKeyboardButton("10000", callback_data=f"get_{domain}_10000")
+            ],
+            [InlineKeyboardButton("❌ إغلاق", callback_data="close_search")]
+        ])
 
-    if available_count <= 0:
-        await message.reply(f"❌ للأسف، لا توجد أية حسابات متوفرة حالياً لموقع <b>{domain}</b>.")
-        for owner in OWNER_IDS:
-            try: await client.send_message(owner, f"⚠️ **إشعار طلب:** تم البحث عن <code>{domain}</code> وهو غير متوفر!")
-            except Exception: pass
+        await msg.edit_text(
+            f"🎯 **تم العثور على نتائج للدومين:** <code>{domain}</code>\n\n"
+            f"📊 المتاح في القاعدة: <b>{available:,}</b> حساب\n\n"
+            f"اختر العدد الذي تريد استخراجه أدناه:",
+            reply_markup=markup
+        )
         return
 
-    pts = get_user_points(user_id)
-    buttons_list = []
-    max_k = available_count // 1000
-
-    row = []
-    for k in range(1, min(max_k + 1, 11)):
-        amount = k * 1000
-        price = 0.0 if is_owner_user else float(k)
-        btn = InlineKeyboardButton(f"📥 {k}K ({price} ن)", callback_data=f"buy_{amount}_{price}_{domain}")
-        row.append(btn)
-        if len(row) == 2:
-            buttons_list.append(row)
-            row = []
-            
-    if row: buttons_list.append(row)
-
-    total_price = 0.0 if is_owner_user else float(math.ceil(available_count / 1000))
-    buttons_list.append([
-        InlineKeyboardButton(f"🚀 سحب الكل ({available_count:,} حساب) بـ {total_price} نقطة", callback_data=f"buy_{available_count}_{total_price}_{domain}")
-    ])
-    buttons_list.append([InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_pull")])
-
-    await message.reply(
-        f"🎯 **الموقع المطلوب:** <code>{domain}</code>\n"
-        f"📊 **الحسابات المتوفرة:** <b>{available_count:,}</b> حساب\n"
-        f"💳 **رصيدك الحالي:** <b>{pts}</b> نقطة\n\n"
-        "اختر الكمية التي تريد سحبها من الأزرار أدناه:",
-        reply_markup=InlineKeyboardMarkup(buttons_list)
-    )
-
-@app.on_callback_query(filters.regex(r"^buy_(\d+)_(.+)_(.+)"))
-async def handle_buy_callback(client: Client, callback: CallbackQuery):
+@app.on_callback_query(filters.regex("^get_"))
+async def callback_get_combos(client: Client, callback: CallbackQuery):
     user_id = callback.from_user.id
-    is_owner_user = is_owner(user_id)
-
-    if not is_owner_user:
+    if not is_owner(user_id):
         is_ok, missing = await check_subscription(client, user_id)
         if not is_ok:
-            await callback.answer("❌ يجب الاشتراك في القنوات أولاً!", show_alert=True)
-            await send_force_sub_message(client, user_id, missing)
+            await callback.answer("❌ يجب الاشتراك في القنوات أولاً لاستخدام البوت!", show_alert=True)
             return
 
-    match = callback.data.split("_", 3)
-    amount_to_pull = int(match[1])
-    required_points = float(match[2])
-    domain = match[3]
-
-    pts = get_user_points(user_id)
-    if not is_owner_user and pts < required_points:
-        await callback.answer(f"❌ رصيدك غير كافٍ! تحتاج {required_points} نقطة.", show_alert=True)
+    parts = callback.data.split("_")
+    if len(parts) < 3:
+        await callback.answer("خطأ في البيانات.", show_alert=True)
         return
 
-    await callback.answer("⏳ جاري بدء الاستخراج والمعالجة...")
-    status_msg = await callback.message.edit_text(f"⚡ جاري استخراج <b>{amount_to_pull:,}</b> كومبو لموقع <b>{domain}</b>...")
+    domain = parts[1]
+    amount = int(parts[2])
 
-    try: log_search_domain(domain)
-    except Exception: pass
+    points_per_1k = 1.0
+    required_points = math.ceil((amount / 1000.0) * points_per_1k * 10) / 10.0
+    if required_points < 0.1:
+        required_points = 0.1
 
-    filename = None
+    user_pts = get_user_points(user_id)
+
+    if not is_owner(user_id) and user_pts < required_points:
+        await callback.answer(
+            f"❌ رصيدك غير كافي!\nتحتاج إلى {required_points} نقطة، ورصيدك الحالي هو {user_pts} نقطة.",
+            show_alert=True
+        )
+        return
+
+    await callback.answer("⏳ جاري استخراج الحسابات وتجهيز الملف...", show_alert=False)
+    await callback.message.edit_text(f"⏳ جاري سحب وإعداد <b>{amount:,}</b> حساب للدومين `{domain}`...")
+
+    results = await fetch_and_delete_combos(domain, amount)
+
+    if not results:
+        await callback.message.edit_text(f"❌ عذراً، نفدت الحسابات المطلوبة أو حدث خطأ أثناء السحب لـ `{domain}`.")
+        return
+
+    if not is_owner(user_id):
+        deduct_user_points(user_id, required_points)
+
+    log_search_domain(domain)
+    increment_operations()
+
+    await send_audit_log(client, callback.from_user, domain, len(results), 0 if is_owner(user_id) else required_points)
+
+    file_obj = io.BytesIO("\n".join(results).encode("utf-8"))
+    file_name = f"{domain}_{len(results)}_combos.txt"
+    file_obj.name = file_name
+
+    caption_text = (
+        f"✅ **تم استخراج الحسابات بنجاح!**\n\n"
+        f"🌐 الدومين: <code>{domain}</code>\n"
+        f"📊 العدد المستخرج: <b>{len(results):,}</b>\n"
+    )
+    if not is_owner(user_id):
+        caption_text += f"💳 النقاط المستهلكة: <b>{required_points}</b> نقطة\n💎 رصيدك المتبقي: <b>{get_user_points(user_id)}</b> نقطة"
+
+    await client.send_document(
+        chat_id=user_id,
+        document=file_obj,
+        caption=caption_text
+    )
     try:
-        results = await fetch_and_delete_combos(domain, amount_to_pull)
+        await callback.message.delete()
+    except Exception:
+        pass
 
-        if not results:
-            await status_msg.edit_text(f"❌ حدث خطأ أو تم سحب البيانات من قبل مستخدم آخر لموقع <b>{domain}</b>.")
-            return
-
-        fetched_count = len(results)
-
-        filename = f"results_{domain}_{user_id}_{uuid.uuid4().hex[:8]}.txt"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write("\n".join(results))
-
-        caption = (
-            f"✅ تم استخراج <b>{fetched_count:,}</b> كومبو لـ <b>{domain}</b>\n"
-            f"💳 الخصم: <b>{required_points}</b> نقطة"
-        )
-        
-        await client.send_document(
-            chat_id=user_id,
-            document=filename,
-            caption=caption
-        )
-
-        if not is_owner_user and required_points > 0:
-            deduct_user_points(user_id, required_points)
-        
-        increment_operations()
-
-        await send_audit_log(client, callback.from_user, domain, fetched_count, required_points)
-
-        try: await status_msg.delete()
-        except Exception: pass
-
-    except FloodWait as e:
-        await client.send_message(user_id, f"⏳ انتظر {e.value} ثانية بسبب FloodWait ثم حاول مرة أخرى.")
-    except Exception as e:
-        await client.send_message(user_id, f"❌ حدث خطأ أثناء الاستخراج:\n<code>{str(e)[:300]}</code>")
-        print(f"[EXTRACT ERROR] user={user_id} domain={domain} → {e}")
-    finally:
-        if filename and os.path.exists(filename):
-            try: os.remove(filename)
-            except Exception: pass
-
-@app.on_callback_query(filters.regex("^cancel_pull$"))
-async def cancel_pull_cb(client: Client, callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.edit_text("❌ تم إلغاء العملية.")
+@app.on_callback_query(filters.regex("^close_search$"))
+async def close_search_cb(client: Client, callback: CallbackQuery):
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
 # ==================== التشغيل ====================
 if __name__ == "__main__":
-    print("⚡ البوت يعمل الآن بكامل الميزات + نظام اشتراك إجباري احترافي...")
+    print("🤖 Bot is starting...")
     app.run()
