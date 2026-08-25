@@ -21,6 +21,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8839466034:AAF_ONFjOcoOSrcQtiTRrtWlTQJCDtR-C
 OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").split(",") if x.strip()]
 DB_PATH = os.getenv("DB_PATH", "combos.db")
 bot_enabled_for_users = True
+ulp_feature_enabled = True  # متغير حالة تفعيل أو إيقاف قسم فرز ملفات ULP
 
 user_action_state = {}
 user_filter_keywords = {}
@@ -657,11 +658,30 @@ async def force_sub_guard(client: Client, message: Message) -> bool:
     
     return True
 
+# ==================== تحكم المالك بفرز ULP (/stop و /on) ====================
+@app.on_message(filters.command("stop") & filters.user(OWNER_IDS))
+async def stop_ulp_feature(client: Client, message: Message):
+    global ulp_feature_enabled
+    ulp_feature_enabled = False
+    await message.reply("🛑 تم إيقاف قسم فرز ملفات ULP بنجاح. لن يستجيب لأي طلبات فرز حالياً.")
+
+@app.on_message(filters.command("on") & filters.user(OWNER_IDS))
+async def on_ulp_feature(client: Client, message: Message):
+    global ulp_feature_enabled
+    ulp_feature_enabled = True
+    await message.reply("✅ تم تفعيل قسم فرز ملفات ULP بنجاح وعاد للعمل.")
+
 # ==================== قسم فرز ملفات ULP ====================
 @app.on_message(filters.regex("^📂 فرز ملفات ULP$"))
 async def start_ulp_filter(client: Client, message: Message):
     if not await force_sub_guard(client, message):
         return
+    
+    global ulp_feature_enabled
+    if not ulp_feature_enabled and not is_owner(message.from_user.id):
+        await message.reply("⚠️ قسم فرز ملفات ULP متوقف حالياً من قبل المالك.")
+        return
+
     user_id = message.from_user.id
     user_action_state[user_id] = "awaiting_filter_keywords"
     await message.reply(
@@ -680,6 +700,10 @@ async def process_ulp_document_filter(client: Client, message: Message):
 
     if not await force_sub_guard(client, message):
         return
+
+    global ulp_feature_enabled
+    if not ulp_feature_enabled and not is_owner(user_id):
+        return  # يتجاهل الملفات كلياً إذا كان متوقفاً للأعضاء
 
     keywords = user_filter_keywords.get(user_id)
     if not keywords:
@@ -1049,7 +1073,8 @@ async def disable_bot(client: Client, message: Message):
 @app.on_message(filters.regex("^📈 حالة البوت$") & filters.user(OWNER_IDS))
 async def bot_status(client: Client, message: Message):
     status = "🟢 مفعل للأعضاء" if bot_enabled_for_users else "🔴 مغلق عن الأعضاء"
-    await message.reply(f"حالة البوت حالياً:\n\n{status}")
+    ulp_st = "🟢 مفعل" if ulp_feature_enabled else "🔴 متوقف"
+    await message.reply(f"حالة البوت حالياً:\n\n• البوت العام: {status}\n• فرز ملفات ULP: {ulp_st}")
 
 @app.on_message(filters.regex("^📊 الإحصائيات$") & filters.user(OWNER_IDS))
 async def show_stats(client: Client, message: Message):
@@ -1139,6 +1164,12 @@ async def process_text_inputs(client: Client, message: Message):
     text_input = message.text.strip()
 
     if user_action_state.get(user_id) == "awaiting_filter_keywords":
+        global ulp_feature_enabled
+        if not ulp_feature_enabled and not is_owner(user_id):
+            user_action_state.pop(user_id, None)
+            await message.reply("⚠️ قسم فرز ملفات ULP متوقف حالياً.")
+            return
+
         user_action_state.pop(user_id, None)
         raw_keys = [k.strip().lower() for k in re.split(r'[,||\n]', text_input) if k.strip()]
         if not raw_keys:
