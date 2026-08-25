@@ -257,7 +257,7 @@ async def send_audit_log(client: Client, user, domain: str, amount: int, points:
     except Exception as e:
         print(f"[AUDIT LOG ERROR] {e}")
 
-# ==================== نظام الاشتراك الإجباري ====================
+# ==================== نظام الاشتراك الإجباري المحدث ====================
 def get_forced_channels():
     conn = get_db()
     cursor = conn.cursor()
@@ -270,7 +270,15 @@ async def is_user_in_channel(client: Client, user_id: int, channel_id: str) -> b
     try:
         chat_id = int(channel_id) if (channel_id.startswith("-") or channel_id.isdigit()) else channel_id
         member = await client.get_chat_member(chat_id, user_id)
-        return member.status not in ["left", "kicked"]
+        status = member.status
+        
+        # الحالات الصحيحة التي تعتبر العضو مشتركاً
+        valid_statuses = {"creator", "administrator", "member"}
+        if status in valid_statuses:
+            return True
+        elif status == "restricted":
+            return getattr(member, "is_member", False)
+        return False
     except (UserNotParticipant, ChannelPrivate, ChatAdminRequired):
         return False
     except Exception as e:
@@ -366,7 +374,7 @@ async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
                     pass
     conn.close()
 
-# ==================== الكومبو معالجة وإعادة صيغة ====================
+# ==================== الكومبو معالجة ودقة كاملة ====================
 def count_available_combos(domain: str) -> int:
     conn = get_db()
     cursor = conn.cursor()
@@ -390,23 +398,28 @@ async def fetch_and_delete_combos(domain: str, limit_count: int) -> list:
             cursor = conn.cursor()
             query = f"%{domain.lower()}%"
             
+            # جلب عدد كافٍ مع الأخذ بعين الاعتبار التكرار والتنظيف لضمان اكتمال العدد المطلوب بالتمام والكمال
+            fetch_limit = int(limit_count * 1.5) + 100
             cursor.execute(
                 "SELECT id, combo FROM combos WHERE LOWER(combo) LIKE ? LIMIT ?",
-                (query, limit_count)
+                (query, fetch_limit)
             )
             rows = cursor.fetchall()
             if not rows:
                 return []
             
-            ids_to_delete = [r[0] for r in rows]
             results = []
+            ids_to_delete = []
             seen = set()
             
             for r in rows:
+                if len(results) >= limit_count:
+                    break
                 cleaned = extract_email_pass(r[1])
                 if cleaned and cleaned not in seen:
                     seen.add(cleaned)
                     results.append(cleaned)
+                    ids_to_delete.append(r[0])
             
             if ids_to_delete:
                 placeholders = ",".join("?" * len(ids_to_delete))
@@ -509,7 +522,7 @@ def delete_by_domain(domain: str) -> int:
     conn.close()
     return count
 
-# ==================== الكيبوردات ====================
+# ==================== الكيبوردات (مع إخفاء زر ULP عن الأعضاء) ====================
 def owner_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("🔍 بحث عن دومين"), KeyboardButton("📂 فرز ملفات ULP")],
@@ -525,7 +538,7 @@ def owner_keyboard():
 
 def user_keyboard():
     return ReplyKeyboardMarkup([
-        [KeyboardButton("🔍 بحث عن دومين"), KeyboardButton("📂 فرز ملفات ULP")],
+        [KeyboardButton("🔍 بحث عن دومين")],
         [KeyboardButton("💰 رصيدي ونقاطي"), KeyboardButton("🔗 رابط الإحالة")],
         [KeyboardButton("📺 قنوات الإعلانات")]
     ], resize_keyboard=True)
@@ -672,15 +685,12 @@ async def on_ulp_feature(client: Client, message: Message):
     ulp_feature_enabled = True
     await message.reply("✅ تم تفعيل قسم فرز ملفات ULP بنجاح وعاد للعمل.")
 
-# ==================== قسم فرز ملفات ULP ====================
-@app.on_message(filters.regex("^📂 فرز ملفات ULP$"))
+# ==================== قسم فرز ملفات ULP (للمالك فقط) ====================
+@app.on_message(filters.regex("^📂 فرز ملفات ULP$") & filters.user(OWNER_IDS))
 async def start_ulp_filter(client: Client, message: Message):
     global ulp_feature_enabled
     if not ulp_feature_enabled:
         await message.reply("⚠️ قسم فرز ملفات ULP متوقف حالياً من قبل المالك.")
-        return
-
-    if not await force_sub_guard(client, message):
         return
 
     user_id = message.from_user.id
@@ -709,17 +719,17 @@ async def cancel_ulp_filter_cb(client: Client, callback: CallbackQuery):
 async def process_ulp_document_filter(client: Client, message: Message):
     user_id = message.from_user.id
     
-    # حالة رفع ملفات للكومبو (للمالك) - مع دعم رفع دفعة ملفات
+    # حالة رفع ملفات للكومبو (للمالك)
     if is_owner(user_id) and user_action_state.get(user_id) == "awaiting_ulp_upload":
         await handle_large_document(client, message)
         return
 
-    # للفرز: يجب أن يكون زر الفرز مفعلاً من قبل المالك بواسطة /on
+    # للفرز: مخصص للمالك فقط
+    if not is_owner(user_id):
+        return
+
     global ulp_feature_enabled
     if not ulp_feature_enabled:
-        return  # لا يقوم بأي رد أو فرز إطلاقاً إذا كان متوقفاً
-
-    if not await force_sub_guard(client, message):
         return
 
     keywords = user_filter_keywords.get(user_id)
@@ -770,7 +780,6 @@ async def process_ulp_document_filter(client: Client, message: Message):
 
             kw_text = ", ".join([f"`{k}`" for k in keywords])
             
-            # إرسال الملف المفروز للمستخدم
             await client.send_document(
                 chat_id=message.chat.id,
                 document=output_filename,
@@ -787,21 +796,14 @@ async def process_ulp_document_filter(client: Client, message: Message):
         await message.reply(f"❌ حدث خطأ أثناء عملية الفرز:\n<code>{str(e)}</code>")
 
     finally:
-        # 1. حذف الملف الأصلي المرفوع نهائياً من ذاكرة السيرفر
         if saved_ulp_path and os.path.exists(saved_ulp_path):
-            try:
-                os.remove(saved_ulp_path)
-            except Exception:
-                pass
+            try: os.remove(saved_ulp_path)
+            except Exception: pass
 
-        # 2. حذف الملف المفروز الناتج نهائياً من ذاكرة السيرفر
         if output_filename and os.path.exists(output_filename):
-            try:
-                os.remove(output_filename)
-            except Exception:
-                pass
+            try: os.remove(output_filename)
+            except Exception: pass
 
-        # إعادة إنهاء حالة المعالجة للمستخدم
         user_filter_keywords.pop(user_id, None)
         user_action_state.pop(user_id, None)
 
@@ -1205,7 +1207,7 @@ async def process_text_inputs(client: Client, message: Message):
         user_action_state.pop(user_id, None)
         raw_keys = [k.strip().lower() for k in re.split(r'[,||\n]', text_input) if k.strip()]
         if not raw_keys:
-            await message.reply("❌ لم تقوم بإدخال كلمات صحيحة! جرب مجدداً الضغط على زر فرز ملفات ULP.")
+            await message.reply("❌ لم تقم بإدخال كلمات صحيحة! جرب مجدداً الضغط على زر فرز ملفات ULP.")
             return
         
         user_filter_keywords[user_id] = raw_keys
@@ -1217,7 +1219,7 @@ async def process_text_inputs(client: Client, message: Message):
         
         await message.reply(
             f"✅ **تم اعتماد الكلمات المستهدفة بنجاح:**\n{kw_formatted}\n\n"
-            f"📥 **أرسل ملف ULP الآن** وسيتم فرزه حلياً وتسليمك النتائج ثم حذفه تلقائياً.",
+            f"📥 **أرسل ملف ULP الآن** وسيتم فرزه حالياً وتسليمك النتائج ثم حذفه تلقائياً.",
             reply_markup=cancel_kb
         )
         return
@@ -1339,7 +1341,6 @@ async def handle_buy_callback(client: Client, callback: CallbackQuery):
         
         increment_operations()
 
-        # إرسال إلى سجل العمليات (Audit Log)
         await send_audit_log(client, callback.from_user, domain, fetched_count, required_points)
 
         try: await status_msg.delete()
