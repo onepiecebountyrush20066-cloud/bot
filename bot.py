@@ -1292,4 +1292,6 @@ async def cancel_pull_cb(client: Client, callback: CallbackQuery):
     await callback.message.edit_text("❌ تم إلغاء العملية.")
 
 # ==================== التشغيل ====================
-print("⚡ Bot is st) 
+print("⚡ Bot is starting...")
+print("✅ جميع الأنظمة والأدوات تعمل بسلاسة وسرعة فائقة!")
+app.run()
