@@ -9,7 +9,7 @@ from collections import Counter
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton, 
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated, ReplyKeyboardRemove
 )
 from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated, ChatAdminRequired, UserNotParticipant, ChannelPrivate
 
@@ -528,6 +528,16 @@ def user_keyboard():
         [KeyboardButton("📺 قنوات الإعلانات")]
     ], resize_keyboard=True)
 
+def cancel_filter_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ إيقاف عملية الفرز", callback_data="stop_filter_action")]
+    ])
+
+def cancel_upload_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ إيقاف عملية الرفع", callback_data="stop_upload_action")]
+    ])
+
 # ==================== /start ====================
 @app.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message):
@@ -657,7 +667,7 @@ async def force_sub_guard(client: Client, message: Message) -> bool:
     
     return True
 
-# ==================== قسم فرز ملفات ULP ====================
+# ==================== قسم فرز ملفات ULP والأزرار الإلغاء ====================
 @app.on_message(filters.regex("^📂 فرز ملفات ULP$"))
 async def start_ulp_filter(client: Client, message: Message):
     if not await force_sub_guard(client, message):
@@ -667,8 +677,26 @@ async def start_ulp_filter(client: Client, message: Message):
     await message.reply(
         "🎯 **قسم فرز ملفات ULP المستهدفة**\n\n"
         "أرسل الكلمات المفتاحية أو اسم الدومين/الخدمة التي تريد استخراجها من الملف.\n"
-        "يمكنك إرسال كلمة واحدة أو عدة كلمات تفصل بينها بفارزة `,` (مثال: `ludo, bandainamcoid.com`):"
+        "يمكنك إرسال كلمة واحدة أو عدة كلمات تفصل بينها بفارزة `,` (مثال: `ludo, bandainamcoid.com`):",
+        reply_markup=cancel_filter_keyboard()
     )
+
+@app.on_callback_query(filters.regex("^stop_filter_action$"))
+async def stop_filter_callback(client: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_action_state.pop(user_id, None)
+    user_filter_keywords.pop(user_id, None)
+    await callback.answer("🛑 تم إلغاء عملية الفرز بنجاح.")
+    await callback.message.edit_text("🛑 **تم إيقاف عملية الفرز وإلغاء العملية.**")
+    await client.send_message(user_id, "🏠 العودة للقائمة الرئيسية:", reply_markup=owner_keyboard() if is_owner(user_id) else user_keyboard())
+
+@app.on_callback_query(filters.regex("^stop_upload_action$"))
+async def stop_upload_callback(client: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_action_state.pop(user_id, None)
+    await callback.answer("🛑 تم إلغاء عملية رفع الملفات.")
+    await callback.message.edit_text("🛑 **تم إيقاف عملية رفع ملفات ULP.**")
+    await client.send_message(user_id, "🏠 العودة للقائمة الرئيسية:", reply_markup=owner_keyboard() if is_owner(user_id) else user_keyboard())
 
 @app.on_message(filters.document)
 async def process_ulp_document_filter(client: Client, message: Message):
@@ -1100,7 +1128,10 @@ async def ask_domain_delete(client: Client, message: Message):
 @app.on_message(filters.regex("^📤 رفع ملف ULP$") & filters.user(OWNER_IDS))
 async def ask_file(client: Client, message: Message):
     user_action_state[message.from_user.id] = "awaiting_ulp_upload"
-    await message.reply("📤 أرسل ملفات الـ <b>ULP</b> الآن لمعالجتها وإضافتها للكومبو...")
+    await message.reply(
+        "📤 أرسل ملفات الـ <b>ULP</b> الآن لمعالجتها وإضافتها للكومبو...",
+        reply_markup=cancel_upload_keyboard()
+    )
 
 async def handle_large_document(client: Client, message: Message):
     user_id = message.from_user.id
@@ -1142,14 +1173,15 @@ async def process_text_inputs(client: Client, message: Message):
         user_action_state.pop(user_id, None)
         raw_keys = [k.strip().lower() for k in re.split(r'[,||\n]', text_input) if k.strip()]
         if not raw_keys:
-            await message.reply("❌ لم قمت بإدخال كلمات صحيحة! جرب مجدداً الضغط على زر فرز ملفات ULP.")
+            await message.reply("❌ لم تقوم بإدخال كلمات صحيحة! جرب مجدداً الضغط على زر فرز ملفات ULP.")
             return
         
         user_filter_keywords[user_id] = raw_keys
         kw_formatted = ", ".join([f"<code>{k}</code>" for k in raw_keys])
         await message.reply(
             f"✅ **تم اعتماد الكلمات المستهدفة بنجاح:**\n{kw_formatted}\n\n"
-            f"📥 **أرسل ملف ULP الآن** وسيتم حفظه وفرزه فوراً وتسليمك النتائج."
+            f"📥 **أرسل ملف ULP الآن** وسيتم حفظه وفرزه فوراً وتسليمك النتائج.",
+            reply_markup=cancel_filter_keyboard()
         )
         return
 
