@@ -411,56 +411,6 @@ def get_last_operations(user_id: int, limit: int = 5) -> list:
     conn.close()
     return rows
 
-def check_and_reward_advanced_referral(user_id: int, client: Client = None):
-    row = get_user_row(user_id)
-    if not row:
-        return
-    referrer_id = row["referred_by"]
-    if not referrer_id or row["referral_rewarded"] == 1:
-        return
-
-    count = get_user_withdrawals_count(user_id)
-    if count >= 2:
-        reward = get_advanced_referral_points()
-        add_user_points(referrer_id, reward)
-
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET referral_rewarded = 1 WHERE user_id = ?",
-            (user_id,)
-        )
-        conn.commit()
-        conn.close()
-
-        if client:
-            try:
-                asyncio.create_task(
-                    client.send_message(
-                        referrer_id,
-                        f"🎉 <b>مكافأة إضافية من الإحالة!</b>\n\n"
-                        f"المدعو الخاص بك أكمل <b>عمليتين سحب</b>.\n"
-                        f"حصلت على <b>{reward}</b> نقطة إضافية."
-                    )
-                )
-            except Exception:
-                pass
-
-def mark_first_withdrawal(user_id: int) -> bool:
-    row = get_user_row(user_id)
-    if not row or row["first_withdrawal_done"] == 1:
-        return False
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE users SET first_withdrawal_done = 1 WHERE user_id = ?",
-        (user_id,)
-    )
-    conn.commit()
-    conn.close()
-    add_user_points(user_id, FIRST_WITHDRAWAL_BONUS)
-    return True
-
 # ==================== المكافأة اليومية ====================
 def claim_daily_reward(user_id: int) -> tuple:
     row = get_user_row(user_id)
@@ -1250,6 +1200,111 @@ async def personal_stats(client: Client, message: Message):
     row = get_user_row(message.from_user.id)
     await message.reply(f"📊 إجمالي سحوباتك: <b>{row['total_withdrawals']}</b> عملية")
 
+# ==================== الأزرار الإدارية الكاملة ====================
+@app.on_message(filters.regex("^🗑 حذف حسب دومين$") & filters.user(OWNER_IDS))
+async def ask_delete_domain(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_delete_domain"
+    await message.reply("🗑 أرسل الدومين الذي تريد حذف كافة حساباته من قاعدة البيانات:")
+
+@app.on_message(filters.regex("^🔥 الأكثر والأقل طلباً$") & filters.user(OWNER_IDS))
+async def show_popular_domains(client: Client, message: Message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT domain, search_count FROM search_stats ORDER BY search_count DESC LIMIT 10")
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        await message.reply("📊 لا توجد إحصائيات بحث مسجلة حتى الآن.")
+        return
+    text = "🔥 <b>الأكثر طلباً وبحثاً:</b>\n\n"
+    for i, r in enumerate(rows, 1):
+        text += f"{i}. <code>{r['domain']}</code> (عدد العمليات: {r['search_count']})\n"
+    await message.reply(text)
+
+@app.on_message(filters.regex("^➕ إرسال نقاط ID$") & filters.user(OWNER_IDS))
+async def ask_send_pts(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_send_pts"
+    await message.reply("➕ أرسل الآيدي والمبلغ بهذه الصيغة:\n`ID AMOUNT`\nمثال: `123456789 10`")
+
+@app.on_message(filters.regex("^⚙️ نقاط الإحالة$") & filters.user(OWNER_IDS))
+async def ask_ref_pts(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_ref_pts"
+    await message.reply(f"⚙️ نقاط الإحالة الحالية: <b>{get_referral_points()}</b>\nأرسل القيمة الجديدة للرصيد:")
+
+@app.on_message(filters.regex("^📢 إضافة إعلان قناة$") & filters.user(OWNER_IDS))
+async def ask_add_ad(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_add_ad"
+    await message.reply("📢 أرسل يوزر القناة ومكافأة النقاط هكذا:\n`@ChannelUsername 1`")
+
+@app.on_message(filters.regex("^💎 إحصائيات النقاط$") & filters.user(OWNER_IDS))
+async def top_points_users(client: Client, message: Message):
+    rows = get_top_points_users(15)
+    if not rows:
+        await message.reply("💎 لا توجد بيانات مسجلة.")
+        return
+    text = "💎 <b>أكثر المستخدمين امتلاكاً للنقاط:</b>\n\n"
+    for i, r in enumerate(rows, 1):
+        text += f"{i}. <code>{r['user_id']}</code> - <b>{r['points']}</b> نقطة ({r['level']})\n"
+    await message.reply(text)
+
+@app.on_message(filters.regex("^👥 الأكثر نشاطاً$") & filters.user(OWNER_IDS))
+async def most_active_users(client: Client, message: Message):
+    rows = get_most_active_users(10)
+    if not rows:
+        await message.reply("👥 لا توجد عمليات سحب مسجلة.")
+        return
+    text = "👥 <b>الأكثر نشاطاً في السحب:</b>\n\n"
+    for i, r in enumerate(rows, 1):
+        text += f"{i}. <code>{r['user_id']}</code> - <b>{r['total_withdrawals']}</b> عملية سحب\n"
+    await message.reply(text)
+
+@app.on_message(filters.regex("^🚫 حظر عضو$") & filters.user(OWNER_IDS))
+async def ask_ban_user(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_ban_user"
+    await message.reply("🚫 أرسل آيدي العضو المراد حظره:")
+
+@app.on_message(filters.regex("^✅ فك حظر عضو$") & filters.user(OWNER_IDS))
+async def ask_unban_user(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_unban_user"
+    await message.reply("✅ أرسل آيدي العضو لفك حظره:")
+
+@app.on_message(filters.regex("^💣 حذف كل البيانات$") & filters.user(OWNER_IDS))
+async def confirm_delete_all(client: Client, message: Message):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚠️ نعم، احذف الكل نهائياً", callback_data="confirm_wipe_db")],
+        [InlineKeyboardButton("❌ إلغاء", callback_data="cancel_wipe_db")]
+    ])
+    await message.reply("💣 هل أنت متأكد من حذف جميع الكومبوهات وقاعدة البيانات؟", reply_markup=kb)
+
+@app.on_callback_query(filters.regex("^confirm_wipe_db$") & filters.user(OWNER_IDS))
+async def wipe_db_cb(client: Client, callback: CallbackQuery):
+    delete_all_combos()
+    await callback.answer("تم حذف كافة الكومبوهات بنجاح.", show_alert=True)
+    await callback.message.edit_text("💣 تم تفريغ قاعدة بيانات الكومبوهات بالكامل.")
+
+@app.on_callback_query(filters.regex("^cancel_wipe_db$"))
+async def cancel_wipe_cb(client: Client, callback: CallbackQuery):
+    await callback.answer("تم الإلغاء.")
+    await callback.message.edit_text("❌ تم إلغاء عملية الحذف.")
+
+@app.on_message(filters.regex("^📈 حالة البوت$") & filters.user(OWNER_IDS))
+async def bot_status_details(client: Client, message: Message):
+    total, _, users_c, blocked_c, active_c = get_stats()
+    text = (
+        f"📈 <b>تقرير حالة البوت الشامل:</b>\n\n"
+        f"• إجمالي الكومبوهات: <b>{total:,}</b>\n"
+        f"• إجمالي الأعضاء: <b>{users_c:,}</b>\n"
+        f"• الأعضاء النشطون: <b>{active_c:,}</b>\n"
+        f"• الأعضاء المحظورون: <b>{blocked_c:,}</b>\n"
+        f"• إجمالي عمليات السحب: <b>{get_total_operations():,}</b>\n"
+        f"• حالة البوت للأعضاء: {'✅ يعمل' if bot_enabled_for_users else '🚫 متوقف'}"
+    )
+    await message.reply(text)
+
+@app.on_message(filters.regex("^📈 عدد العمليات$") & filters.user(OWNER_IDS))
+async def total_operations_count(client: Client, message: Message):
+    await message.reply(f"📈 إجمالي العمليات الناجحة في البوت: <b>{get_total_operations():,}</b> عملية")
+
 # ==================== الإدارة ====================
 @app.on_message(filters.regex("^🧾 قناة السجل \(Audit Log\)$") & filters.user(OWNER_IDS))
 async def audit_log_settings(client: Client, message: Message):
@@ -1263,18 +1318,8 @@ async def set_log_channel_cmd(client: Client, message: Message):
 
 @app.on_message(filters.regex("^🎁 إنشاء رابط هدية$") & filters.user(OWNER_IDS))
 async def make_gift_process(client: Client, message: Message):
-    if len(message.command) > 1:
-        pts = float(message.command[1])
-        code = str(uuid.uuid4())[:8]
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO gifts (code, points) VALUES (?, ?)", (code, pts))
-        conn.commit()
-        conn.close()
-        bot_username = (await client.get_me()).username
-        await message.reply(f"🎁 رابط الهدية:\nhttps://t.me/{bot_username}?start=gift_{code}")
-    else:
-        await message.reply("استخدم: `/make_gift 5`")
+    user_action_state[message.from_user.id] = "awaiting_gift_amount"
+    await message.reply("🎁 أرسل عدد النقاط لرابط الهدية (مثال: 5):")
 
 @app.on_message(filters.command("send_pts") & filters.user(OWNER_IDS))
 async def process_send_pts(client: Client, message: Message):
@@ -1361,15 +1406,21 @@ async def ask_file(client: Client, message: Message):
     await message.reply("📤 أرسل الملفات الآن للإضافة.")
 
 async def handle_large_document(client: Client, message: Message):
+    temp_path = None
     try:
-        msg = await message.reply("⏳ جاري الرفع...")
+        msg = await message.reply("⏳ جاري الرفع المعالجة...")
         temp_path = await message.download()
         added = await asyncio.to_thread(add_combos_from_file, temp_path)
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
         await msg.edit_text(f"✅ تمت الإضافة بنجاح: <b>{added:,}</b>")
     except Exception as e:
         await message.reply(f"❌ خطأ: {e}")
+    finally:
+        # حذف الملف من السيرفر بعد الانتهاء تماماً تماماً كما طلبت
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 # ==================== البحث والاستخراج ====================
 @app.on_message(filters.regex("^🔍 بحث عن دومين$"))
@@ -1384,14 +1435,15 @@ async def ask_domain(client: Client, message: Message):
 async def process_text_inputs(client: Client, message: Message):
     user_id = message.from_user.id
     text_input = message.text.strip()
+    state = user_action_state.get(user_id)
 
-    if user_action_state.get(user_id) == "awaiting_filter_keywords":
+    if state == "awaiting_filter_keywords":
         user_filter_keywords[user_id] = [k.strip().lower() for k in re.split(r'[,|\n]', text_input) if k.strip()]
         user_action_state[user_id] = "awaiting_ulp_file"
         await message.reply("✅ أرسل ملف ULP الآن.")
         return
 
-    if user_action_state.get(user_id) == "awaiting_search_domain":
+    if state == "awaiting_search_domain":
         user_action_state.pop(user_id, None)
         domain = text_input.lower()
         if not is_owner(user_id) and not await force_sub_guard(client, message):
@@ -1415,6 +1467,83 @@ async def process_text_inputs(client: Client, message: Message):
             [InlineKeyboardButton(f"📥 سحب الكل ({available:,})", callback_data=f"get_{domain}_all")]
         ])
         await msg.edit_text(f"🎯 متاح لـ `{domain}`: <b>{available:,}</b>\nاختر الكمية:", reply_markup=markup)
+        return
+
+    # معالجة الحالات الإدارية الإضافية لضمان عمل الأزرار بالكامل
+    if is_owner(user_id):
+        if state == "awaiting_delete_domain":
+            user_action_state.pop(user_id, None)
+            deleted_count = delete_by_domain(text_input)
+            await message.reply(f"🗑 تم حذف <b>{deleted_count:,}</b> سطر للدومين `{text_input}`.")
+            return
+        elif state == "awaiting_send_pts":
+            user_action_state.pop(user_id, None)
+            try:
+                parts = text_input.split()
+                target_id = int(parts[0])
+                pts_val = float(parts[1])
+                add_user_points(target_id, pts_val)
+                await message.reply(f"✅ تم إضافة {pts_val} نقطة للعضو `{target_id}`.")
+            except Exception:
+                await message.reply("❌ صيغة خاطئة. استخدم: `ID AMOUNT`")
+            return
+        elif state == "awaiting_ref_pts":
+            user_action_state.pop(user_id, None)
+            try:
+                val = float(text_input)
+                set_referral_points(val)
+                await message.reply(f"✅ تم تحديث نقاط الإحالة إلى: {val}")
+            except Exception:
+                await message.reply("❌ قيمة غير صالحة.")
+            return
+        elif state == "awaiting_add_ad":
+            user_action_state.pop(user_id, None)
+            try:
+                parts = text_input.split()
+                ch_name = parts[0]
+                reward_val = float(parts[1])
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute("INSERT OR REPLACE INTO ad_channels (channel_id, points_reward) VALUES (?, ?)", (ch_name, reward_val))
+                conn.commit()
+                conn.close()
+                await message.reply(f"✅ تم إضافة القناة الإعلانية `{ch_name}` بمكافأة `{reward_val}`.")
+            except Exception:
+                await message.reply("❌ صيغة خاطئة. استخدم: `@ChannelUsername 1`")
+            return
+        elif state == "awaiting_ban_user":
+            user_action_state.pop(user_id, None)
+            try:
+                uid = int(text_input)
+                update_user_block_status(uid, 1, "حظر إداري")
+                await message.reply(f"🚫 تم حظر العضو `{uid}`.")
+            except Exception:
+                await message.reply("❌ آيدي غير صالح.")
+            return
+        elif state == "awaiting_unban_user":
+            user_action_state.pop(user_id, None)
+            try:
+                uid = int(text_input)
+                update_user_block_status(uid, 0, None)
+                await message.reply(f"✅ تم فك حظر العضو `{uid}`.")
+            except Exception:
+                await message.reply("❌ آيدي غير صالح.")
+            return
+        elif state == "awaiting_gift_amount":
+            user_action_state.pop(user_id, None)
+            try:
+                pts = float(text_input)
+                code = str(uuid.uuid4())[:8]
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO gifts (code, points) VALUES (?, ?)", (code, pts))
+                conn.commit()
+                conn.close()
+                bot_username = (await client.get_me()).username
+                await message.reply(f"🎁 رابط الهدية:\nhttps://t.me/{bot_username}?start=gift_{code}")
+            except Exception:
+                await message.reply("❌ قيمة غير صالحة.")
+            return
 
 @app.on_callback_query(filters.regex("^get_"))
 async def callback_get_combos(client: Client, callback: CallbackQuery):
@@ -1445,9 +1574,7 @@ async def callback_get_combos(client: Client, callback: CallbackQuery):
 
     user_pts = get_user_points(user_id)
     if not is_owner(user_id) and user_pts < required_points:
-        # إذا كان خيار "سحب الكل" ورصيد المستخدم لا يغطي الكل، يمكننا ضبط الكمية حسب نقاطه المتاحة
         if amount_str == "all":
-            # حساب الكمية القصوى التي يمكن للمستخدم سحبها بنقاطه
             max_possible = int(user_pts * 1000)
             if max_possible > 0:
                 amount = min(available, max_possible)
@@ -1492,5 +1619,5 @@ async def callback_get_combos(client: Client, callback: CallbackQuery):
         pass
 
 if __name__ == "__main__":
-    print("🤖 Bot is running with anti-duplicate & All-Withdraw feature...")
+    print("🤖 Bot is running with all buttons active & ULP cleanup feature...")
     app.run()
