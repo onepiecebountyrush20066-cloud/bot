@@ -466,9 +466,9 @@ def check_and_reward_advanced_referral(user_id: int, client: Client = None):
                 asyncio.create_task(
                     client.send_message(
                         referrer_id,
-                        f"🎉 <b>مكافأة الإحالة المتقدمة!</b>\n\n"
+                        f"🎉 <b>مكافأة إضافية من الإحالة!</b>\n\n"
                         f"المدعو الخاص بك أكمل <b>عمليتين سحب</b>.\n"
-                        f"حصلت على <b>{reward}</b> نقطة."
+                        f"حصلت على <b>{reward}</b> نقطة إضافية."
                     )
                 )
             except Exception:
@@ -1071,21 +1071,31 @@ async def start_handler(client: Client, message: Message):
                 await message.reply("❌ كود الهدية غير صالح.")
         elif ref_payload.isdigit():
             referrer_id = int(ref_payload)
-            # الإحالة المتقدمة: نسجل referred_by فقط، والنقاط بعد عمليتين سحب
+            # إحالة جديدة: نقاط أساسية فوراً + مكافأة إضافية بعد عمليتين سحب
             if referrer_id != user_id and not is_existing_user:
                 cursor.execute(
                     "UPDATE users SET referred_by = ? WHERE user_id = ?",
                     (referrer_id, user_id)
                 )
                 conn.commit()
-                # ما نعطيش نقاط فوراً (نظام متقدم)
+
+                # 1) النقاط الأساسية فوراً (حسب إعداد المالك)
+                base_pts = get_referral_points()
+                if base_pts > 0:
+                    add_user_points(referrer_id, base_pts)
+
                 try:
-                    await client.send_message(
-                        referrer_id,
-                        f"👤 انضم عضو جديد عبر رابطك!\n"
-                        f"هتحصل على <b>{get_advanced_referral_points()}</b> نقطة "
-                        f"بعد ما يعمل <b>عمليتين سحب</b>."
+                    extra = get_advanced_referral_points()
+                    msg_ref = (
+                        f"🎉 <b>انضم عضو جديد عبر رابطك!</b>\n\n"
+                        f"✅ حصلت على <b>{base_pts}</b> نقطة (مكافأة الانضمام).\n"
                     )
+                    if extra > 0:
+                        msg_ref += (
+                            f"➕ وهتحصل على <b>{extra}</b> نقطة إضافية "
+                            f"بعد ما المدعو يعمل <b>عمليتين سحب</b>."
+                        )
+                    await client.send_message(referrer_id, msg_ref)
                 except Exception:
                     pass
 
@@ -1432,12 +1442,16 @@ async def referral_link(client: Client, message: Message):
     bot_username = (await client.get_me()).username
     user_id = message.from_user.id
     link = f"https://t.me/{bot_username}?start={user_id}"
+    base_pts = get_referral_points()
     adv_pts = get_advanced_referral_points()
-    await message.reply(
+    text = (
         f"🔗 <b>رابط الإحالة الخاص بك:</b>\n<code>{link}</code>\n\n"
-        f"شاركه مع أصدقائك.\n"
-        f"هتحصل على <b>{adv_pts}</b> نقطة بعد ما المدعو يعمل <b>عمليتين سحب</b>."
+        f"شاركه مع أصدقائك وتحصل على:\n"
+        f"• <b>{base_pts}</b> نقطة فوراً عند انضمام العضو\n"
     )
+    if adv_pts > 0:
+        text += f"• <b>{adv_pts}</b> نقطة إضافية بعد ما المدعو يعمل <b>عمليتين سحب</b>"
+    await message.reply(text)
 
 @app.on_message(filters.regex("^📺 قنوات الإعلانات$"))
 async def show_ad_channels(client: Client, message: Message):
@@ -1507,12 +1521,27 @@ async def set_log_channel_cmd(client: Client, message: Message):
 
 @app.on_message(filters.regex("^⚙️ نقاط الإحالة$") & filters.user(OWNER_IDS))
 async def ref_pts_settings(client: Client, message: Message):
+    base = get_referral_points()
     adv = get_advanced_referral_points()
     await message.reply(
-        f"⚙️ <b>نقاط الإحالة المتقدمة الحالية:</b> <b>{adv}</b>\n\n"
-        f"(تُعطى بعد ما المدعو يعمل عمليتين سحب)\n\n"
-        "للتغيير:\n`/set_adv_ref 0.5`"
+        f"⚙️ <b>إعدادات نقاط الإحالة</b>\n\n"
+        f"• النقاط الأساسية (عند الانضمام): <b>{base}</b>\n"
+        f"• النقاط الإضافية (بعد عمليتين سحب): <b>{adv}</b>\n\n"
+        f"لتغيير الأساسية:\n`/set_ref_points 1`\n\n"
+        f"لتغيير الإضافية:\n`/set_adv_ref 0.5`"
     )
+
+@app.on_message(filters.command("set_ref_points") & filters.user(OWNER_IDS))
+async def set_ref_pts_cmd(client: Client, message: Message):
+    if len(message.command) < 2:
+        await message.reply("❌ مثال: `/set_ref_points 1`")
+        return
+    try:
+        pts = float(message.command[1])
+        set_referral_points(pts)
+        await message.reply(f"✅ تم تغيير نقاط الإحالة الأساسية إلى <b>{pts}</b>")
+    except ValueError:
+        await message.reply("❌ أدخل رقم صحيح.")
 
 @app.on_message(filters.command("set_adv_ref") & filters.user(OWNER_IDS))
 async def set_adv_ref_cmd(client: Client, message: Message):
@@ -1522,7 +1551,7 @@ async def set_adv_ref_cmd(client: Client, message: Message):
     try:
         pts = float(message.command[1])
         set_setting("advanced_referral_points", str(pts))
-        await message.reply(f"✅ تم تغيير مكافأة الإحالة المتقدمة إلى <b>{pts}</b>")
+        await message.reply(f"✅ تم تغيير مكافأة الإحالة الإضافية إلى <b>{pts}</b>")
     except ValueError:
         await message.reply("❌ أدخل رقم صحيح.")
 
