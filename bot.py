@@ -677,461 +677,7 @@ async def on_ad_member_update(client: Client, update: ChatMemberUpdated):
                     pass
     conn.close()
 
-# ==================== معالجة الكومبو (عدم التكرار) ====================
-def count_available_combos(domain: str) -> int:
-    conn = get_db()
-    cursor = conn.cursor()
-    query = f"%{domain.lower()}%"
-    cursor.execute("SELECT COUNT(*) as c FROM combos WHERE LOWER(combo) LIKE ?", (query,))
-    count = cursor.fetchone()["c"]
-    conn.close()
-    return count
-
-def extract_email_pass(line: str) -> str:
-    line = line.strip()
-    if not line:
-        return line
-    parts = line.split(':')
-    if len(parts) >= 3:
-        return f"{parts[-2]}:{parts[-1]}"
-    if len(parts) == 2:
-        return f"{parts[0]}:{parts[1]}"
-    return line
-
-# ==================== دوال معالجة الملفات والنسخ المزدوج ====================
-def process_duplicate_file(file_path: str, domain: str) -> tuple:
-    """
-    معالجة الملف وإنشاء نسختين:
-    1- النسخة الأصلية: نفس المحتوى بدون تعديل
-    2- النسخة المعدلة: نفس الإيميلات مع تغيير الباسوردات إلى القائمة المحددة
-    """
-    original_lines = []
-    modified_lines = []
-    
-    # قراءة الملف
-    for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'utf-16']:
-        try:
-            with open(file_path, 'r', encoding=enc, errors='ignore') as f:
-                for line in f:
-                    line_str = line.strip()
-                    if line_str:
-                        original_lines.append(line_str)
-            break
-        except Exception:
-            continue
-    
-    if not original_lines:
-        return None, None
-    
-    # إنشاء النسخة المعدلة
-    for line in original_lines:
-        parts = line.split(':')
-        if len(parts) >= 2:
-            # الإيميل هو الجزء الأول، الباسورد هو الجزء الأخير
-            email = parts[0]
-            # اختيار باسورد عشوائي من القائمة
-            new_password = random.choice(PASSWORD_REPLACEMENTS)
-            modified_lines.append(f"{email}:{new_password}")
-        else:
-            modified_lines.append(line)
-    
-    return original_lines, modified_lines
-
-async def fetch_and_delete_combos(domain: str, limit_count: int) -> list:
-    def _db_op():
-        conn = None
-        try:
-            conn = get_db()
-            cursor = conn.cursor()
-            query = f"%{domain.lower()}%"
-            fetch_limit = int(limit_count * 2.5) + 1000
-            cursor.execute(
-                "SELECT id, combo FROM combos WHERE LOWER(combo) LIKE ? LIMIT ?",
-                (query, fetch_limit)
-            )
-            rows = cursor.fetchall()
-            if not rows:
-                return []
-
-            results = []
-            ids_to_delete = []
-            seen = set()
-
-            for r in rows:
-                if len(results) >= limit_count:
-                    break
-                cleaned = extract_email_pass(r["combo"])
-                if cleaned and cleaned not in seen:
-                    seen.add(cleaned)
-                    results.append(cleaned)
-                    ids_to_delete.append(r["id"])
-
-            if ids_to_delete:
-                placeholders = ",".join("?" * len(ids_to_delete))
-                cursor.execute(
-                    f"DELETE FROM combos WHERE id IN ({placeholders})",
-                    ids_to_delete
-                )
-                conn.commit()
-            return results
-        except Exception as e:
-            print(f"[DB ERROR] {e}")
-            if conn:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            return []
-        finally:
-            if conn:
-                conn.close()
-
-    return await asyncio.to_thread(_db_op)
-
-# ==================== سحب المالك (خاص بالمالك فقط - شامل وكامل) ====================
-async def owner_full_withdrawal(client: Client, domain: str, limit_count: int, message: Message):
-    """
-    دالة خاصة بسحب المالك - شاملة 100% بدون استثناءات
-    تقوم بجلب كافة الحسابات المتاحة للدومين المطلوب مع إنشاء نسختين
-    """
-    # جلب الكومبوهات من قاعدة البيانات
-    results = await fetch_and_delete_combos(domain, limit_count)
-    
-    if not results:
-        await message.reply(f"❌ لا توجد حسابات للدومين `{domain}`.")
-        return
-    
-    # إنشاء ملفين: الأصلي والمعدل
-    # النسخة الأصلية
-    original_content = "\n".join(results)
-    original_file = io.BytesIO(original_content.encode("utf-8"))
-    original_file.name = f"{domain}_original_{len(results)}.txt"
-    
-    # النسخة المعدلة (تغيير الباسوردات)
-    modified_lines = []
-    for line in results:
-        parts = line.split(':')
-        if len(parts) >= 2:
-            email = parts[0]
-            new_password = random.choice(PASSWORD_REPLACEMENTS)
-            modified_lines.append(f"{email}:{new_password}")
-        else:
-            modified_lines.append(line)
-    
-    modified_content = "\n".join(modified_lines)
-    modified_file = io.BytesIO(modified_content.encode("utf-8"))
-    modified_file.name = f"{domain}_modified_{len(results)}.txt"
-    
-    # إرسال الملفين
-    await client.send_document(
-        chat_id=message.chat.id,
-        document=original_file,
-        caption=f"📄 <b>النسخة الأصلية</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{len(results):,}</b> حساب\n✅ بدون أي تعديل على الإيميلات أو الباسوردات"
-    )
-    
-    await client.send_document(
-        chat_id=message.chat.id,
-        document=modified_file,
-        caption=f"🔄 <b>النسخة المعدلة</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{len(results):,}</b> حساب\n🔑 تم تغيير الباسوردات إلى القائمة المحددة"
-    )
-    
-    # تسجيل العملية
-    record_withdrawal(message.from_user.id, domain, len(results), 0)
-    log_search_domain(domain)
-    increment_operations()
-    
-    await message.reply(f"✅ تم سحب <b>{len(results):,}</b> حساب للدومين `{domain}` وإرسال نسختين (أصلية ومعدلة).")
-
-@app.on_message(filters.regex("^🔍 بحث عن دومين$"))
-async def ask_domain(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_owner(user_id) and not await force_sub_guard(client, message):
-        return
-    user_action_state[user_id] = "awaiting_search_domain"
-    await message.reply("📝 أرسل الدومين المطلوب:")
-
-# ==================== معالجة البحث والسحب ====================
-@app.on_message(filters.text & ~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺|💎|📋|👥|📂)"))
-async def process_text_inputs(client: Client, message: Message):
-    user_id = message.from_user.id
-    text_input = message.text.strip()
-    state = user_action_state.get(user_id)
-
-    if state == "awaiting_filter_keywords":
-        user_filter_keywords[user_id] = [k.strip().lower() for k in re.split(r'[,|\n]', text_input) if k.strip()]
-        user_action_state[user_id] = "awaiting_ulp_file"
-        await message.reply("✅ أرسل ملف ULP الآن.")
-        return
-
-    if state == "awaiting_search_domain":
-        user_action_state.pop(user_id, None)
-        domain = text_input.lower()
-        
-        # التحقق من وجود الحسابات
-        available = count_available_combos(domain)
-        
-        if available == 0:
-            add_to_waitlist(user_id, domain)
-            await message.reply("❌ لا توجد حسابات حالياً. تم إضافتك لقائمة الانتظار.")
-            return
-
-        # إذا كان المالك - سحب كامل وشامل
-        if is_owner(user_id):
-            await message.reply(f"👑 <b>سحب المالك</b>\n🌐 الدومين: `{domain}`\n📊 المتاح: <b>{available:,}</b> حساب\n⏳ جاري السحب الشامل...")
-            await owner_full_withdrawal(client, domain, available, message)
-            return
-        
-        # للمستخدمين العاديين - عرض أزرار الاختيار
-        msg = await message.reply(f"🎯 متاح لـ `{domain}`: <b>{available:,}</b>\nاختر الكمية:", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("100", callback_data=f"get_{domain}_100"),
-             InlineKeyboardButton("500", callback_data=f"get_{domain}_500"),
-             InlineKeyboardButton("1000", callback_data=f"get_{domain}_1000")],
-            [InlineKeyboardButton("2500", callback_data=f"get_{domain}_2500"),
-             InlineKeyboardButton("5000", callback_data=f"get_{domain}_5000"),
-             InlineKeyboardButton("10000", callback_data=f"get_{domain}_10000")],
-            [InlineKeyboardButton(f"📥 سحب الكل ({available:,})", callback_data=f"get_{domain}_all")]
-        ]))
-        return
-
-    # معالجة الحالات الإدارية الإضافية لضمان عمل الأزرار بالكامل
-    if is_owner(user_id):
-        if state == "awaiting_delete_domain":
-            user_action_state.pop(user_id, None)
-            deleted_count = delete_by_domain(text_input)
-            await message.reply(f"🗑 تم حذف <b>{deleted_count:,}</b> سطر للدومين `{text_input}`.")
-            return
-        elif state == "awaiting_send_pts":
-            user_action_state.pop(user_id, None)
-            try:
-                parts = text_input.split()
-                target_id = int(parts[0])
-                pts_val = float(parts[1])
-                add_user_points(target_id, pts_val)
-                await message.reply(f"✅ تم إضافة {pts_val} نقطة للعضو `{target_id}`.")
-            except Exception:
-                await message.reply("❌ صيغة خاطئة. استخدم: `ID AMOUNT`")
-            return
-        elif state == "awaiting_ref_pts":
-            user_action_state.pop(user_id, None)
-            try:
-                val = float(text_input)
-                set_referral_points(val)
-                await message.reply(f"✅ تم تحديث نقاط الإحالة إلى: {val}")
-            except Exception:
-                await message.reply("❌ قيمة غير صالحة.")
-            return
-        elif state == "awaiting_add_ad":
-            user_action_state.pop(user_id, None)
-            try:
-                parts = text_input.split()
-                ch_name = parts[0]
-                reward_val = float(parts[1])
-                conn = get_db()
-                cursor = conn.cursor()
-                cursor.execute("INSERT OR REPLACE INTO ad_channels (channel_id, points_reward) VALUES (?, ?)", (ch_name, reward_val))
-                conn.commit()
-                conn.close()
-                await message.reply(f"✅ تم إضافة القناة الإعلانية `{ch_name}` بمكافأة `{reward_val}`.")
-            except Exception:
-                await message.reply("❌ صيغة خاطئة. استخدم: `@ChannelUsername 1`")
-            return
-        elif state == "awaiting_ban_user":
-            user_action_state.pop(user_id, None)
-            try:
-                uid = int(text_input)
-                update_user_block_status(uid, 1, "حظر إداري")
-                await message.reply(f"🚫 تم حظر العضو `{uid}`.")
-            except Exception:
-                await message.reply("❌ آيدي غير صالح.")
-            return
-        elif state == "awaiting_unban_user":
-            user_action_state.pop(user_id, None)
-            try:
-                uid = int(text_input)
-                update_user_block_status(uid, 0, None)
-                await message.reply(f"✅ تم فك حظر العضو `{uid}`.")
-            except Exception:
-                await message.reply("❌ آيدي غير صالح.")
-            return
-        elif state == "awaiting_gift_amount":
-            user_action_state.pop(user_id, None)
-            try:
-                pts = float(text_input)
-                code = str(uuid.uuid4())[:8]
-                conn = get_db()
-                cursor = conn.cursor()
-                cursor.execute("INSERT INTO gifts (code, points) VALUES (?, ?)", (code, pts))
-                conn.commit()
-                conn.close()
-                bot_username = (await client.get_me()).username
-                await message.reply(f"🎁 رابط الهدية:\nhttps://t.me/{bot_username}?start=gift_{code}")
-            except Exception:
-                await message.reply("❌ قيمة غير صالحة.")
-            return
-
-# ==================== معالجة الكومبو (عدم التكرار) ====================
-def count_available_combos(domain: str) -> int:
-    conn = get_db()
-    cursor = conn.cursor()
-    query = f"%{domain.lower()}%"
-    cursor.execute("SELECT COUNT(*) as c FROM combos WHERE LOWER(combo) LIKE ?", (query,))
-    count = cursor.fetchone()["c"]
-    conn.close()
-    return count
-
-def extract_email_pass(line: str) -> str:
-    line = line.strip()
-    if not line:
-        return line
-    parts = line.split(':')
-    if len(parts) >= 3:
-        return f"{parts[-2]}:{parts[-1]}"
-    if len(parts) == 2:
-        return f"{parts[0]}:{parts[1]}"
-    return line
-
-async def fetch_and_delete_combos(domain: str, limit_count: int) -> list:
-    def _db_op():
-        conn = None
-        try:
-            conn = get_db()
-            cursor = conn.cursor()
-            query = f"%{domain.lower()}%"
-            fetch_limit = int(limit_count * 2.5) + 1000
-            cursor.execute(
-                "SELECT id, combo FROM combos WHERE LOWER(combo) LIKE ? LIMIT ?",
-                (query, fetch_limit)
-            )
-            rows = cursor.fetchall()
-            if not rows:
-                return []
-
-            results = []
-            ids_to_delete = []
-            seen = set()
-
-            for r in rows:
-                if len(results) >= limit_count:
-                    break
-                cleaned = extract_email_pass(r["combo"])
-                if cleaned and cleaned not in seen:
-                    seen.add(cleaned)
-                    results.append(cleaned)
-                    ids_to_delete.append(r["id"])
-
-            if ids_to_delete:
-                placeholders = ",".join("?" * len(ids_to_delete))
-                cursor.execute(
-                    f"DELETE FROM combos WHERE id IN ({placeholders})",
-                    ids_to_delete
-                )
-                conn.commit()
-            return results
-        except Exception as e:
-            print(f"[DB ERROR] {e}")
-            if conn:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            return []
-        finally:
-            if conn:
-                conn.close()
-
-    return await asyncio.to_thread(_db_op)
-
-# ==================== معالجة الملفات والنسخ المزدوج (تابع) ====================
-def process_duplicate_file(file_path: str, domain: str) -> tuple:
-    """
-    معالجة الملف وإنشاء نسختين:
-    1- النسخة الأصلية: نفس المحتوى بدون تعديل
-    2- النسخة المعدلة: نفس الإيميلات مع تغيير الباسوردات إلى القائمة المحددة
-    """
-    original_lines = []
-    modified_lines = []
-    
-    # قراءة الملف
-    for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'utf-16']:
-        try:
-            with open(file_path, 'r', encoding=enc, errors='ignore') as f:
-                for line in f:
-                    line_str = line.strip()
-                    if line_str:
-                        original_lines.append(line_str)
-            break
-        except Exception:
-            continue
-    
-    if not original_lines:
-        return None, None
-    
-    # إنشاء النسخة المعدلة
-    for line in original_lines:
-        parts = line.split(':')
-        if len(parts) >= 2:
-            email = parts[0]
-            new_password = random.choice(PASSWORD_REPLACEMENTS)
-            modified_lines.append(f"{email}:{new_password}")
-        else:
-            modified_lines.append(line)
-    
-    return original_lines, modified_lines
-
-async def owner_full_withdrawal(client: Client, domain: str, limit_count: int, message: Message):
-    """
-    دالة خاصة بسحب المالك - شاملة 100% بدون استثناءات
-    تقوم بجلب كافة الحسابات المتاحة للدومين المطلوب مع إنشاء نسختين
-    """
-    # جلب الكومبوهات من قاعدة البيانات
-    results = await fetch_and_delete_combos(domain, limit_count)
-    
-    if not results:
-        await message.reply(f"❌ لا توجد حسابات للدومين `{domain}`.")
-        return
-    
-    # إنشاء ملفين: الأصلي والمعدل
-    # النسخة الأصلية
-    original_content = "\n".join(results)
-    original_file = io.BytesIO(original_content.encode("utf-8"))
-    original_file.name = f"{domain}_original_{len(results)}.txt"
-    
-    # النسخة المعدلة (تغيير الباسوردات)
-    modified_lines = []
-    for line in results:
-        parts = line.split(':')
-        if len(parts) >= 2:
-            email = parts[0]
-            new_password = random.choice(PASSWORD_REPLACEMENTS)
-            modified_lines.append(f"{email}:{new_password}")
-        else:
-            modified_lines.append(line)
-    
-    modified_content = "\n".join(modified_lines)
-    modified_file = io.BytesIO(modified_content.encode("utf-8"))
-    modified_file.name = f"{domain}_modified_{len(results)}.txt"
-    
-    # إرسال الملفين
-    await client.send_document(
-        chat_id=message.chat.id,
-        document=original_file,
-        caption=f"📄 <b>النسخة الأصلية</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{len(results):,}</b> حساب\n✅ بدون أي تعديل على الإيميلات أو الباسوردات"
-    )
-    
-    await client.send_document(
-        chat_id=message.chat.id,
-        document=modified_file,
-        caption=f"🔄 <b>النسخة المعدلة</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{len(results):,}</b> حساب\n🔑 تم تغيير الباسوردات إلى القائمة المحددة"
-    )
-    
-    # تسجيل العملية
-    record_withdrawal(message.from_user.id, domain, len(results), 0)
-    log_search_domain(domain)
-    increment_operations()
-    
-    await message.reply(f"✅ تم سحب <b>{len(results):,}</b> حساب للدومين `{domain}` وإرسال نسختين (أصلية ومعدلة).")
-
-# ==================== معالجة الكومبو (عدم التكرار) ====================
+# ==================== دوال معالجة الكومبو ====================
 def count_available_combos(domain: str) -> int:
     conn = get_db()
     cursor = conn.cursor()
@@ -1309,6 +855,96 @@ def get_most_active_users(limit: int = 10):
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+# ==================== دوال معالجة الملفات والنسخ المزدوج ====================
+def process_duplicate_file(file_path: str, domain: str) -> tuple:
+    """
+    معالجة الملف وإنشاء نسختين:
+    1- النسخة الأصلية: نفس المحتوى بدون تعديل
+    2- النسخة المعدلة: نفس الإيميلات مع تغيير الباسوردات إلى القائمة المحددة
+    """
+    original_lines = []
+    modified_lines = []
+    
+    # قراءة الملف
+    for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'utf-16']:
+        try:
+            with open(file_path, 'r', encoding=enc, errors='ignore') as f:
+                for line in f:
+                    line_str = line.strip()
+                    if line_str:
+                        original_lines.append(line_str)
+            break
+        except Exception:
+            continue
+    
+    if not original_lines:
+        return None, None
+    
+    # إنشاء النسخة المعدلة
+    for line in original_lines:
+        parts = line.split(':')
+        if len(parts) >= 2:
+            email = parts[0]
+            new_password = random.choice(PASSWORD_REPLACEMENTS)
+            modified_lines.append(f"{email}:{new_password}")
+        else:
+            modified_lines.append(line)
+    
+    return original_lines, modified_lines
+
+async def owner_full_withdrawal(client: Client, domain: str, limit_count: int, message: Message):
+    """
+    دالة خاصة بسحب المالك - شاملة 100% بدون استثناءات
+    تقوم بجلب كافة الحسابات المتاحة للدومين المطلوب مع إنشاء نسختين
+    """
+    # جلب الكومبوهات من قاعدة البيانات
+    results = await fetch_and_delete_combos(domain, limit_count)
+    
+    if not results:
+        await message.reply(f"❌ لا توجد حسابات للدومين `{domain}`.")
+        return
+    
+    # إنشاء ملفين: الأصلي والمعدل
+    # النسخة الأصلية
+    original_content = "\n".join(results)
+    original_file = io.BytesIO(original_content.encode("utf-8"))
+    original_file.name = f"{domain}_original_{len(results)}.txt"
+    
+    # النسخة المعدلة (تغيير الباسوردات)
+    modified_lines = []
+    for line in results:
+        parts = line.split(':')
+        if len(parts) >= 2:
+            email = parts[0]
+            new_password = random.choice(PASSWORD_REPLACEMENTS)
+            modified_lines.append(f"{email}:{new_password}")
+        else:
+            modified_lines.append(line)
+    
+    modified_content = "\n".join(modified_lines)
+    modified_file = io.BytesIO(modified_content.encode("utf-8"))
+    modified_file.name = f"{domain}_modified_{len(results)}.txt"
+    
+    # إرسال الملفين
+    await client.send_document(
+        chat_id=message.chat.id,
+        document=original_file,
+        caption=f"📄 <b>النسخة الأصلية</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{len(results):,}</b> حساب\n✅ بدون أي تعديل على الإيميلات أو الباسوردات"
+    )
+    
+    await client.send_document(
+        chat_id=message.chat.id,
+        document=modified_file,
+        caption=f"🔄 <b>النسخة المعدلة</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{len(results):,}</b> حساب\n🔑 تم تغيير الباسوردات إلى القائمة المحددة"
+    )
+    
+    # تسجيل العملية
+    record_withdrawal(message.from_user.id, domain, len(results), 0)
+    log_search_domain(domain)
+    increment_operations()
+    
+    await message.reply(f"✅ تم سحب <b>{len(results):,}</b> حساب للدومين `{domain}` وإرسال نسختين (أصلية ومعدلة).")
 
 # ==================== الكيبوردات ====================
 def owner_keyboard():
@@ -1665,6 +1301,210 @@ async def personal_stats(client: Client, message: Message):
     row = get_user_row(message.from_user.id)
     await message.reply(f"📊 إجمالي سحوباتك: <b>{row['total_withdrawals']}</b> عملية")
 
+# ==================== البحث والاستخراج ====================
+@app.on_message(filters.regex("^🔍 بحث عن دومين$"))
+async def ask_domain(client: Client, message: Message):
+    user_id = message.from_user.id
+    if not is_owner(user_id) and not await force_sub_guard(client, message):
+        return
+    user_action_state[user_id] = "awaiting_search_domain"
+    await message.reply("📝 أرسل الدومين المطلوب:")
+
+@app.on_message(filters.text & ~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺|💎|📋|👥|📂)"))
+async def process_text_inputs(client: Client, message: Message):
+    user_id = message.from_user.id
+    text_input = message.text.strip()
+    state = user_action_state.get(user_id)
+
+    if state == "awaiting_filter_keywords":
+        user_filter_keywords[user_id] = [k.strip().lower() for k in re.split(r'[,|\n]', text_input) if k.strip()]
+        user_action_state[user_id] = "awaiting_ulp_file"
+        await message.reply("✅ أرسل ملف ULP الآن.")
+        return
+
+    if state == "awaiting_search_domain":
+        user_action_state.pop(user_id, None)
+        domain = text_input.lower()
+        
+        # التحقق من وجود الحسابات
+        available = count_available_combos(domain)
+        
+        if available == 0:
+            add_to_waitlist(user_id, domain)
+            await message.reply("❌ لا توجد حسابات حالياً. تم إضافتك لقائمة الانتظار.")
+            return
+
+        # إذا كان المالك - سحب كامل وشامل
+        if is_owner(user_id):
+            await message.reply(f"👑 <b>سحب المالك</b>\n🌐 الدومين: `{domain}`\n📊 المتاح: <b>{available:,}</b> حساب\n⏳ جاري السحب الشامل...")
+            await owner_full_withdrawal(client, domain, available, message)
+            return
+        
+        # للمستخدمين العاديين - عرض أزرار الاختيار
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("100", callback_data=f"get_{domain}_100"),
+             InlineKeyboardButton("500", callback_data=f"get_{domain}_500"),
+             InlineKeyboardButton("1000", callback_data=f"get_{domain}_1000")],
+            [InlineKeyboardButton("2500", callback_data=f"get_{domain}_2500"),
+             InlineKeyboardButton("5000", callback_data=f"get_{domain}_5000"),
+             InlineKeyboardButton("10000", callback_data=f"get_{domain}_10000")],
+            [InlineKeyboardButton(f"📥 سحب الكل ({available:,})", callback_data=f"get_{domain}_all")]
+        ])
+        await message.reply(f"🎯 متاح لـ `{domain}`: <b>{available:,}</b>\nاختر الكمية:", reply_markup=markup)
+        return
+
+    # معالجة الحالات الإدارية الإضافية لضمان عمل الأزرار بالكامل
+    if is_owner(user_id):
+        if state == "awaiting_delete_domain":
+            user_action_state.pop(user_id, None)
+            deleted_count = delete_by_domain(text_input)
+            await message.reply(f"🗑 تم حذف <b>{deleted_count:,}</b> سطر للدومين `{text_input}`.")
+            return
+        elif state == "awaiting_send_pts":
+            user_action_state.pop(user_id, None)
+            try:
+                parts = text_input.split()
+                target_id = int(parts[0])
+                pts_val = float(parts[1])
+                add_user_points(target_id, pts_val)
+                await message.reply(f"✅ تم إضافة {pts_val} نقطة للعضو `{target_id}`.")
+            except Exception:
+                await message.reply("❌ صيغة خاطئة. استخدم: `ID AMOUNT`")
+            return
+        elif state == "awaiting_ref_pts":
+            user_action_state.pop(user_id, None)
+            try:
+                val = float(text_input)
+                set_referral_points(val)
+                await message.reply(f"✅ تم تحديث نقاط الإحالة إلى: {val}")
+            except Exception:
+                await message.reply("❌ قيمة غير صالحة.")
+            return
+        elif state == "awaiting_add_ad":
+            user_action_state.pop(user_id, None)
+            try:
+                parts = text_input.split()
+                ch_name = parts[0]
+                reward_val = float(parts[1])
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute("INSERT OR REPLACE INTO ad_channels (channel_id, points_reward) VALUES (?, ?)", (ch_name, reward_val))
+                conn.commit()
+                conn.close()
+                await message.reply(f"✅ تم إضافة القناة الإعلانية `{ch_name}` بمكافأة `{reward_val}`.")
+            except Exception:
+                await message.reply("❌ صيغة خاطئة. استخدم: `@ChannelUsername 1`")
+            return
+        elif state == "awaiting_ban_user":
+            user_action_state.pop(user_id, None)
+            try:
+                uid = int(text_input)
+                update_user_block_status(uid, 1, "حظر إداري")
+                await message.reply(f"🚫 تم حظر العضو `{uid}`.")
+            except Exception:
+                await message.reply("❌ آيدي غير صالح.")
+            return
+        elif state == "awaiting_unban_user":
+            user_action_state.pop(user_id, None)
+            try:
+                uid = int(text_input)
+                update_user_block_status(uid, 0, None)
+                await message.reply(f"✅ تم فك حظر العضو `{uid}`.")
+            except Exception:
+                await message.reply("❌ آيدي غير صالح.")
+            return
+        elif state == "awaiting_gift_amount":
+            user_action_state.pop(user_id, None)
+            try:
+                pts = float(text_input)
+                code = str(uuid.uuid4())[:8]
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO gifts (code, points) VALUES (?, ?)", (code, pts))
+                conn.commit()
+                conn.close()
+                bot_username = (await client.get_me()).username
+                await message.reply(f"🎁 رابط الهدية:\nhttps://t.me/{bot_username}?start=gift_{code}")
+            except Exception:
+                await message.reply("❌ قيمة غير صالحة.")
+            return
+
+@app.on_callback_query(filters.regex("^get_"))
+async def callback_get_combos(client: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    # إذا كان المالك - لا نسمح له بالدخول إلى هذه الدالة (يستخدم نظام السحب الشامل الخاص)
+    if is_owner(user_id):
+        await callback.answer("👑 استخدم زر البحث العادي للسحب الشامل.", show_alert=True)
+        return
+    
+    is_ok, _ = await check_subscription(client, user_id)
+    if not is_ok:
+        await callback.answer("❌ اشترك في القنوات أولاً!", show_alert=True)
+        return
+
+    parts = callback.data.split("_")
+    domain = parts[1]
+    amount_str = parts[2]
+
+    available = count_available_combos(domain)
+    if amount_str == "all":
+        amount = available
+    else:
+        amount = int(amount_str)
+
+    if amount <= 0:
+        await callback.answer("❌ عذراً، نفدت الحسابات.", show_alert=True)
+        return
+
+    required_points = round((amount / 1000.0), 2)
+    if required_points < 0.1 and amount > 0:
+        required_points = 0.1
+
+    user_pts = get_user_points(user_id)
+    if user_pts < required_points:
+        if amount_str == "all":
+            max_possible = int(user_pts * 1000)
+            if max_possible > 0:
+                amount = min(available, max_possible)
+                required_points = round((amount / 1000.0), 2)
+            else:
+                await callback.answer("❌ رصيدك غير كافي!", show_alert=True)
+                return
+        else:
+            await callback.answer("❌ رصيدك غير كافي!", show_alert=True)
+            return
+
+    await callback.answer("⏳ جاري الاستخراج...", show_alert=False)
+    await callback.message.edit_text(f"⏳ جاري سحب <b>{amount:,}</b> فريد لـ `{domain}`...")
+
+    results = await fetch_and_delete_combos(domain, amount)
+
+    if not results:
+        await callback.message.edit_text("❌ عذراً، نفدت الحسابات.")
+        return
+
+    actual_amount = len(results)
+    spent = round((actual_amount / 1000.0), 2)
+
+    deduct_user_points(user_id, spent)
+    record_withdrawal(user_id, domain, actual_amount, spent)
+    log_search_domain(domain)
+    increment_operations()
+
+    file_obj = io.BytesIO("\n".join(results).encode("utf-8"))
+    file_obj.name = f"{domain}_{actual_amount}_combos.txt"
+
+    await client.send_document(
+        chat_id=user_id,
+        document=file_obj,
+        caption=f"✅ <b>تم استخراج الحسابات بنجاح (بدون تكرار)!</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{actual_amount:,}</b>"
+    )
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
 # ==================== الأزرار الإدارية الكاملة ====================
 @app.on_message(filters.regex("^🗑 حذف حسب دومين$") & filters.user(OWNER_IDS))
 async def ask_delete_domain(client: Client, message: Message):
@@ -1885,91 +1725,6 @@ async def handle_large_document(client: Client, message: Message):
                 os.remove(temp_path)
             except Exception:
                 pass
-
-# ==================== البحث والاستخراج ====================
-@app.on_message(filters.regex("^🔍 بحث عن دومين$"))
-async def ask_domain(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_owner(user_id) and not await force_sub_guard(client, message):
-        return
-    user_action_state[user_id] = "awaiting_search_domain"
-    await message.reply("📝 أرسل الدومين المطلوب:")
-
-@app.on_callback_query(filters.regex("^get_"))
-async def callback_get_combos(client: Client, callback: CallbackQuery):
-    user_id = callback.from_user.id
-    
-    # إذا كان المالك - لا نسمح له بالدخول إلى هذه الدالة (يستخدم نظام السحب الشامل الخاص)
-    if is_owner(user_id):
-        await callback.answer("👑 استخدم زر البحث العادي للسحب الشامل.", show_alert=True)
-        return
-    
-    is_ok, _ = await check_subscription(client, user_id)
-    if not is_ok:
-        await callback.answer("❌ اشترك في القنوات أولاً!", show_alert=True)
-        return
-
-    parts = callback.data.split("_")
-    domain = parts[1]
-    amount_str = parts[2]
-
-    available = count_available_combos(domain)
-    if amount_str == "all":
-        amount = available
-    else:
-        amount = int(amount_str)
-
-    if amount <= 0:
-        await callback.answer("❌ عذراً، نفدت الحسابات.", show_alert=True)
-        return
-
-    required_points = round((amount / 1000.0), 2)
-    if required_points < 0.1 and amount > 0:
-        required_points = 0.1
-
-    user_pts = get_user_points(user_id)
-    if user_pts < required_points:
-        if amount_str == "all":
-            max_possible = int(user_pts * 1000)
-            if max_possible > 0:
-                amount = min(available, max_possible)
-                required_points = round((amount / 1000.0), 2)
-            else:
-                await callback.answer("❌ رصيدك غير كافي!", show_alert=True)
-                return
-        else:
-            await callback.answer("❌ رصيدك غير كافي!", show_alert=True)
-            return
-
-    await callback.answer("⏳ جاري الاستخراج...", show_alert=False)
-    await callback.message.edit_text(f"⏳ جاري سحب <b>{amount:,}</b> فريد لـ `{domain}`...")
-
-    results = await fetch_and_delete_combos(domain, amount)
-
-    if not results:
-        await callback.message.edit_text("❌ عذراً، نفدت الحسابات.")
-        return
-
-    actual_amount = len(results)
-    spent = round((actual_amount / 1000.0), 2)
-
-    deduct_user_points(user_id, spent)
-    record_withdrawal(user_id, domain, actual_amount, spent)
-    log_search_domain(domain)
-    increment_operations()
-
-    file_obj = io.BytesIO("\n".join(results).encode("utf-8"))
-    file_obj.name = f"{domain}_{actual_amount}_combos.txt"
-
-    await client.send_document(
-        chat_id=user_id,
-        document=file_obj,
-        caption=f"✅ <b>تم استخراج الحسابات بنجاح (بدون تكرار)!</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{actual_amount:,}</b>"
-    )
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
 
 if __name__ == "__main__":
     print("🤖 Bot is running with all buttons active & ULP cleanup feature...")
