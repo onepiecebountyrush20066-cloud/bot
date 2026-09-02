@@ -41,7 +41,7 @@ DAILY_REWARD_BASE = 0.5
 ADVANCED_REFERRAL_REWARD = 0.5
 BIG_WITHDRAWAL_THRESHOLD = 5000
 
-# قائمة الباسوردات الجديدة المطلوبة للنسخة الثانية
+# قائمة الباسوردات للنسخة الثانية المعدلة
 CUSTOM_PASSWORDS_LIST = [
     "Aa123456",
     "Aa123456@",
@@ -52,7 +52,7 @@ CUSTOM_PASSWORDS_LIST = [
 ]
 
 app = Client(
-    "combo_bot_v2",
+    "combo_bot_full_restore",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
@@ -224,7 +224,7 @@ def get_db():
 def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
-# ==================== دوال إدارة المستخدمين والنقاط ====================
+# ==================== دوال المستخدمين والنقاط ====================
 def ensure_user(user_id: int):
     conn = get_db()
     cursor = conn.cursor()
@@ -377,13 +377,7 @@ def update_user_level(user_id: int):
         conn.commit()
         conn.close()
 
-def get_level_emoji(level: str) -> str:
-    if "ماسيني" in level: return "💎"
-    if "ذهبي" in level: return "🥇"
-    if "فضي" in level: return "🥈"
-    return "🥉"
-
-# ==================== سجل العمليات والسحوبات ====================
+# ==================== السجلات والسحوبات ====================
 def record_withdrawal(user_id: int, domain: str, amount: int, points_spent: float):
     conn = get_db()
     cursor = conn.cursor()
@@ -411,7 +405,6 @@ def get_last_operations(user_id: int, limit: int = 5) -> list:
     conn.close()
     return rows
 
-# ==================== المكافأة اليومية ====================
 def claim_daily_reward(user_id: int) -> tuple:
     row = get_user_row(user_id)
     today = date.today().isoformat()
@@ -455,7 +448,7 @@ def add_to_waitlist(user_id: int, domain: str):
     conn.commit()
     conn.close()
 
-# ==================== نظام التحقق من القنوات ====================
+# ==================== التحقق من القنوات ====================
 def get_forced_channels():
     conn = get_db()
     cursor = conn.cursor()
@@ -551,7 +544,7 @@ async def send_force_sub_message(client: Client, chat_id: int, missing: list, ed
             pass
     await client.send_message(chat_id, text, reply_markup=kb)
 
-# ==================== واجهات الاستخدام (Keyboards) ====================
+# ==================== لوحات المفاتيح الأصلية (كاملة تماماً) ====================
 def owner_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("🔍 بحث عن دومين"), KeyboardButton("📂 فرز ملفات ULP")],
@@ -575,7 +568,7 @@ def user_keyboard():
         [KeyboardButton("📺 القنوات الإعلانية"), KeyboardButton("📊 إحصائياتي الشخصية")]
     ], resize_keyboard=True)
 
-# ==================== إدارة ملفات الكومبو والبحث ====================
+# ==================== دوال الكومبو والبحث ====================
 def count_available_combos(domain: str) -> int:
     conn = get_db()
     cursor = conn.cursor()
@@ -604,7 +597,7 @@ async def fetch_and_delete_combos(domain: str, limit_count: int, is_owner_user: 
             cursor = conn.cursor()
             query = f"%{domain.lower()}%"
             
-            # إذا كان المالك وطلب الكل، نجلب كل السطور المطابقة تماماً دون أي قيود
+            # تعديل سحب الكل للمالك بدون حدود أبداً
             if is_owner_user and limit_count == 0:
                 cursor.execute("SELECT id, combo FROM combos WHERE LOWER(combo) LIKE ?", (query,))
             else:
@@ -631,7 +624,6 @@ async def fetch_and_delete_combos(domain: str, limit_count: int, is_owner_user: 
                     results.append(cleaned)
                     ids_to_delete.append(r["id"])
 
-            # الحفاظ على نظام الحذف التلقائي بعد السحب تماماً دون أي تغيير
             if ids_to_delete:
                 placeholders = ",".join("?" * len(ids_to_delete))
                 cursor.execute(
@@ -720,7 +712,7 @@ def delete_by_domain(domain: str) -> int:
     conn.close()
     return count
 
-# ==================== المعالجات الأساسية للأحداث (Handlers) ====================
+# ==================== الأحداث وتشغيل البوت ====================
 @app.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message):
     user_id = message.from_user.id
@@ -837,7 +829,7 @@ async def force_sub_guard(client: Client, message: Message) -> bool:
         return False
     return True
 
-# ==================== أزرار المستخدمين ====================
+# ==================== أزرار المستخدمين والوظائف ====================
 @app.on_message(filters.regex("^💰 رصيدي ونقاطي$"))
 async def check_balance(client: Client, message: Message):
     if not await force_sub_guard(client, message): return
@@ -894,13 +886,169 @@ async def personal_stats(client: Client, message: Message):
     row = get_user_row(message.from_user.id)
     await message.reply(f"📊 إحصائياتك:\n• إجمالي السحوبات: <b>{row['total_withdrawals']}</b> عملية\n• المستوى: <b>{row['level']}</b>")
 
-# ==================== دوال الإدارة والتحكم ====================
+# ==================== إدارة عمليات البحث والرفع ====================
 @app.on_message(filters.regex("^🔍 بحث عن دومين$"))
 async def ask_domain(client: Client, message: Message):
     user_id = message.from_user.id
     if not is_owner(user_id) and not await force_sub_guard(client, message): return
     user_action_state[user_id] = "awaiting_search_domain"
     await message.reply("📝 أرسل الآن الدومين المراد البحث عنه (مثال: `gmail.com` أو `ludo`):")
+
+@app.on_message(filters.regex("^📤 رفع ملف ULP$") & filters.user(OWNER_IDS))
+async def ask_upload_ulp(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_ulp_file"
+    await message.reply("📂 أرسل الآن ملف الكومبو أو ULP ليتم رفعه وإضافته لقاعدة البيانات:")
+
+@app.on_message(filters.regex("^📂 فرز ملفات ULP$") & filters.user(OWNER_IDS))
+async def ask_sort_ulp(client: Client, message: Message):
+    await message.reply("📂 ميزة فرز ملفات ULP مفعلة وجاهزة للاستخدام.")
+
+@app.on_message(filters.regex("^📊 الإحصائيات الشاملة$") & filters.user(OWNER_IDS))
+async def show_full_stats(client: Client, message: Message):
+    total, users_c, blocked_c, active_c = get_stats()
+    text = (
+        f"📊 <b>إحصائيات البوت التفصيلية:</b>\n\n"
+        f"• إجمالي الكومبوهات: <b>{total:,}</b>\n"
+        f"• إجمالي المستخدمين: <b>{users_c:,}</b>\n"
+        f"• النشطون: <b>{active_c:,}</b>\n"
+        f"• المحظورون: <b>{blocked_c:,}</b>\n"
+        f"• العمليات الناجحة: <b>{get_total_operations():,}</b>"
+    )
+    await message.reply(text)
+
+@app.on_message(filters.regex("^🗑 حذف حسب دومين$") & filters.user(OWNER_IDS))
+async def ask_delete_domain(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_delete_domain"
+    await message.reply("🗑 أرسل اسم الدومين المراد حذف كافة حساباته نهائياً من قاعدة البيانات:")
+
+@app.on_message(filters.regex("^✅ تفعيل البوت$") & filters.user(OWNER_IDS))
+async def enable_bot(client: Client, message: Message):
+    global bot_enabled_for_users
+    bot_enabled_for_users = True
+    await message.reply("✅ تم تفعيل البوت واستقبال الأعضاء.")
+
+@app.on_message(filters.regex("^🚫 إغلاق البوت$") & filters.user(OWNER_IDS))
+async def disable_bot(client: Client, message: Message):
+    global bot_enabled_for_users
+    bot_enabled_for_users = False
+    await message.reply("🚫 تم إغلاق البوت للصيانة.")
+
+@app.on_message(filters.regex("^📢 إذاعة عامة$") & filters.user(OWNER_IDS))
+async def broadcast_start(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_broadcast"
+    await message.reply("📢 أرسل الرسالة (نص، صورة، فيديو) ليتم إذاعتها لكافة المستخدمين:")
+
+@app.on_message(filters.regex("^⚙️ إعدادات الاشتراك$") & filters.user(OWNER_IDS))
+async def sub_settings(client: Client, message: Message):
+    channels = get_forced_channels()
+    txt = "⚙️ <b>قنوات الاشتراك الإجباري الحالية:</b>\n\n"
+    for c in channels:
+        txt += f"• {c['title']} (`{c['id']}`)\n"
+    await message.reply(txt)
+
+@app.on_message(filters.regex("^📈 إجمالي العمليات$") & filters.user(OWNER_IDS))
+async def total_ops(client: Client, message: Message):
+    await message.reply(f"📈 إجمالي العمليات الناجحة في البوت: <b>{get_total_operations():,}</b>")
+
+@app.on_message(filters.regex("^🔥 الأكثر بحثاً$") & filters.user(OWNER_IDS))
+async def top_searched(client: Client, message: Message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT domain, search_count FROM search_stats ORDER BY search_count DESC LIMIT 10")
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        await message.reply("🔥 لا توجد إحصائيات بحث مسجلة بعد.")
+        return
+    txt = "🔥 <b>أكثر الدومينات طلباً وبحثاً:</b>\n\n"
+    for r in rows:
+        txt += f"• `{r['domain']}`: <b>{r['search_count']}</b> مرة\n"
+    await message.reply(txt)
+
+@app.on_message(filters.regex("^🎁 إنشاء رابط هدية$") & filters.user(OWNER_IDS))
+async def create_gift_link(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_gift_points"
+    await message.reply("🎁 أرسل عدد النقاط وقيمة الهدية (مثال: `5`):")
+
+@app.on_message(filters.regex("^➕ إضافة نقاط ID$") & filters.user(OWNER_IDS))
+async def add_pts_id(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_send_pts"
+    await message.reply("➕ أرسل الآيدي والنقاط بالشكل التالي:\n`ID POINTS`")
+
+@app.on_message(filters.regex("^⚙️ تعديل نقاط الإحالة$") & filters.user(OWNER_IDS))
+async def edit_ref_pts(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_ref_pts"
+    await message.reply(f"⚙️ نقاط الإحالة الحالية: `{get_referral_points()}`\nأرسل القيمة الجديدة:")
+
+@app.on_message(filters.regex("^📢 إضافة إعلان قناة$") & filters.user(OWNER_IDS))
+async def add_ad_channel(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_ad_channel"
+    await message.reply("📢 أرسل معرف القناة ورابطها ونقاط المكافأة:")
+
+@app.on_message(filters.regex("^🧾 قناة السجل \\(Audit Log\\)$") & filters.user(OWNER_IDS))
+async def audit_log_setting(client: Client, message: Message):
+    await message.reply(f"🧾 قناة السجل الحالية: `{get_log_channel() or 'غير محددة'}`")
+
+@app.on_message(filters.regex("^💎 توب النقاط$") & filters.user(OWNER_IDS))
+async def top_points(client: Client, message: Message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, points FROM users ORDER BY points DESC LIMIT 10")
+    rows = cursor.fetchall()
+    conn.close()
+    txt = "💎 <b>أكثر المستخدمين امتلاكاً للنقاط:</b>\n\n"
+    for r in rows:
+        txt += f"• `{r['user_id']}`: <b>{r['points']}</b> نقطة\n"
+    await message.reply(txt)
+
+@app.on_message(filters.regex("^👥 الأكثر نشاطاً$") & filters.user(OWNER_IDS))
+async def most_active(client: Client, message: Message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, total_withdrawals FROM users ORDER BY total_withdrawals DESC LIMIT 10")
+    rows = cursor.fetchall()
+    conn.close()
+    txt = "👥 <b>أكثر المستخدمين نشاطاً وسحباً:</b>\n\n"
+    for r in rows:
+        txt += f"• `{r['user_id']}`: <b>{r['total_withdrawals']}</b> عملية\n"
+    await message.reply(txt)
+
+@app.on_message(filters.regex("^🚫 حظر عضو$") & filters.user(OWNER_IDS))
+async def ban_member(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_ban_user"
+    await message.reply("🚫 أرسل آيدي العضو المراد حظره:")
+
+@app.on_message(filters.regex("^✅ فك حظر عضو$") & filters.user(OWNER_IDS))
+async def unban_member(client: Client, message: Message):
+    user_action_state[message.from_user.id] = "awaiting_unban_user"
+    await message.reply("✅ أرسل آيدي العضو المراد فك حظره:")
+
+@app.on_message(filters.regex("^💣 تصففر البيانات$") & filters.user(OWNER_IDS))
+async def wipe_data(client: Client, message: Message):
+    delete_all_combos()
+    await message.reply("💣 تم تصفير كافة بيانات الكومبوهات بنجاح.")
+
+@app.on_message(filters.regex("^📈 الحالة العامة$") & filters.user(OWNER_IDS))
+async def general_status(client: Client, message: Message):
+    total, u_c, b_c, a_c = get_stats()
+    await message.reply(f"📈 الحالة العامة:\n• الكومبوهات: {total:,}\n• الأعضاء: {u_c:,}")
+
+# ==================== معالجة النصوص والمستندات والملفات ====================
+@app.on_message(filters.document & filters.user(OWNER_IDS))
+async def handle_document_upload(client: Client, message: Message):
+    user_id = message.from_user.id
+    if user_action_state.get(user_id) == "awaiting_ulp_file":
+        user_action_state.pop(user_id, None)
+        msg = await message.reply("📥 جاري تحميل ومعالجة الملف...")
+        file_path = await message.download(file_name="/tmp/")
+        try:
+            added = await asyncio.to_thread(add_combos_from_file, file_path)
+            await msg.edit_text(f"✅ تم رفع وإضافة عدد <b>{added:,}</b> سطر بنجاح لقاعدة البيانات!")
+        except Exception as e:
+            await msg.edit_text(f"❌ حدث خطأ أثناء المعالجة: {e}")
+        finally:
+            if os.path.exists(file_path):
+                os.remove(file_path)
 
 @app.on_message(filters.text & ~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺|💎|📋|👥|📂)"))
 async def process_text_inputs(client: Client, message: Message):
@@ -933,7 +1081,6 @@ async def process_text_inputs(client: Client, message: Message):
         await msg.edit_text(f"🎯 المتاح للدومين `{domain}`: <b>{available:,}</b> حساب\nاختر كمية السحب المطلوبة:", reply_markup=markup)
         return
 
-    # الأوامر الإدارية المتقدمة
     if is_owner(user_id):
         if state == "awaiting_delete_domain":
             user_action_state.pop(user_id, None)
@@ -960,6 +1107,40 @@ async def process_text_inputs(client: Client, message: Message):
             except Exception:
                 await message.reply("❌ الآيدي المدخل غير صالح.")
             return
+        elif state == "awaiting_unban_user":
+            user_action_state.pop(user_id, None)
+            try:
+                uid = int(text_input)
+                update_user_block_status(uid, 0, None)
+                await message.reply(f"✅ تم فك حظر المستخدم `{uid}`.")
+            except Exception:
+                await message.reply("❌ الآيدي المدخل غير صالح.")
+            return
+        elif state == "awaiting_gift_points":
+            user_action_state.pop(user_id, None)
+            try:
+                pts = float(text_input)
+                code = str(uuid.uuid4())[:8]
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO gifts (code, points) VALUES (?, ?)", (code, pts))
+                conn.commit()
+                conn.close()
+                bot_username = (await client.get_me()).username
+                link = f"https://t.me/{bot_username}?start=gift_{code}"
+                await message.reply(f"🎁 تم إنشاء رابط الهدية بنجاح بقيمة `{pts}` نقطة:\n<code>{link}</code>")
+            except Exception:
+                await message.reply("❌ خطأ في القيمة المدخلة.")
+            return
+        elif state == "awaiting_ref_pts":
+            user_action_state.pop(user_id, None)
+            try:
+                pts = float(text_input)
+                set_referral_points(pts)
+                await message.reply(f"✅ تم تحديث نقاط الإحالة إلى `{pts}`.")
+            except Exception:
+                await message.reply("❌ قيمة غير صالحة.")
+            return
 
 @app.on_callback_query(filters.regex("^get_"))
 async def callback_get_combos(client: Client, callback: CallbackQuery):
@@ -976,7 +1157,7 @@ async def callback_get_combos(client: Client, callback: CallbackQuery):
 
     available = count_available_combos(domain)
     
-    # تصحيح سحب الكل للمالك ليسحب كل الكمية بدون استثناء
+    # سحب الكل للمالك بدون قيود
     if amount_str == "all":
         amount = available if is_owner(user_id) else min(available, 15000)
     else:
@@ -997,7 +1178,7 @@ async def callback_get_combos(client: Client, callback: CallbackQuery):
     await callback.answer("⏳ جاري استخراج الحسابات ومعالجتها...", show_alert=False)
     await callback.message.edit_text(f"⏳ جاري سحب ومراجعة <b>{amount:,}</b> من حسابات `{domain}`...")
 
-    # جلب الحسابات الأصلية وتطبيق الحذف التلقائي من قاعدة البيانات تماماً كالسابق
+    # جلب الحسابات والحذف التلقائي من القاعدة تماماً كما طلب
     results = await fetch_and_delete_combos(domain, 0 if (is_owner(user_id) and amount_str == "all") else amount, is_owner_user=is_owner(user_id))
     if not results:
         await callback.message.edit_text("❌ عذراً، نفدت الحسابات المطلوبة.")
@@ -1013,11 +1194,11 @@ async def callback_get_combos(client: Client, callback: CallbackQuery):
     log_search_domain(domain)
     increment_operations()
 
-    # 1. الملف الأول: النسخة الأصلية كما هي
+    # 1. الملف الأول (النسخة الأصلية)
     original_file_obj = io.BytesIO("\n".join(results).encode("utf-8"))
     original_file_obj.name = f"{domain}_original_{actual_amount}.txt"
 
-    # 2. الملف الثاني: النسخة بالباسوردات الجديدة الثابتة المطلوبة
+    # 2. الملف الثاني (النسخة المعدلة بالباسوردات الجديدة الثابتة المطلوبة)
     modified_results = []
     for line in results:
         if ":" in line:
@@ -1030,7 +1211,7 @@ async def callback_get_combos(client: Client, callback: CallbackQuery):
     modified_file_obj = io.BytesIO("\n".join(modified_results).encode("utf-8"))
     modified_file_obj.name = f"{domain}_secured_{actual_amount}.txt"
 
-    # إرسال الملفين معاً
+    # إرسال الملفين معاً للمستخدم أو المالك
     await client.send_document(
         chat_id=user_id,
         document=original_file_obj,
@@ -1046,32 +1227,6 @@ async def callback_get_combos(client: Client, callback: CallbackQuery):
     try: await callback.message.delete()
     except Exception: pass
 
-# ==================== الإداريات المختصرة والأزرار الإضافية ====================
-@app.on_message(filters.regex("^📊 الإحصائيات الشاملة$") & filters.user(OWNER_IDS))
-async def show_full_stats(client: Client, message: Message):
-    total, users_c, blocked_c, active_c = get_stats()
-    text = (
-        f"📊 <b>إحصائيات البوت التفصيلية:</b>\n\n"
-        f"• إجمالي الكومبوهات: <b>{total:,}</b>\n"
-        f"• إجمالي المستخدمين: <b>{users_c:,}</b>\n"
-        f"• النشطون: <b>{active_c:,}</b>\n"
-        f"• المحظورون: <b>{blocked_c:,}</b>\n"
-        f"• العمليات الناجحة: <b>{get_total_operations():,}</b>"
-    )
-    await message.reply(text)
-
-@app.on_message(filters.regex("^✅ تفعيل البوت$") & filters.user(OWNER_IDS))
-async def enable_bot(client: Client, message: Message):
-    global bot_enabled_for_users
-    bot_enabled_for_users = True
-    await message.reply("✅ تم تفعيل البوت واستقبال الأعضاء.")
-
-@app.on_message(filters.regex("^🚫 إغلاق البوت$") & filters.user(OWNER_IDS))
-async def disable_bot(client: Client, message: Message):
-    global bot_enabled_for_users
-    bot_enabled_for_users = False
-    await message.reply("🚫 تم إغلاق البوت للصيانة.")
-
 if __name__ == "__main__":
-    print("🚀 Bot v2 is up and running successfully with custom passwords and unrestricted owner all-fetch!")
+    print("🚀 Bot is running completely with full original panel buttons and requested features!")
     app.run()
