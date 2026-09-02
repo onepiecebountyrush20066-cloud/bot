@@ -28,7 +28,7 @@ OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").spl
 DB_PATH = os.getenv("DB_PATH", "combos.db")
 
 bot_enabled_for_users = True
-ulp_feature_enabled = False
+ulp_sorting_active = True  # متغير حالة تشغيل/إيقاف فرز ملفات ULP
 
 user_action_state = {}
 user_filter_keywords = {}
@@ -52,7 +52,7 @@ CUSTOM_PASSWORDS_LIST = [
 ]
 
 app = Client(
-    "combo_bot_full_restore",
+    "combo_bot_full_restore_with_commands",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
@@ -597,7 +597,7 @@ async def fetch_and_delete_combos(domain: str, limit_count: int, is_owner_user: 
             cursor = conn.cursor()
             query = f"%{domain.lower()}%"
             
-            # تعديل سحب الكل للمالك بدون حدود أبداً
+            # سحب الكل للمالك بدون حدود أبداً
             if is_owner_user and limit_count == 0:
                 cursor.execute("SELECT id, combo FROM combos WHERE LOWER(combo) LIKE ?", (query,))
             else:
@@ -829,6 +829,19 @@ async def force_sub_guard(client: Client, message: Message) -> bool:
         return False
     return True
 
+# ==================== أوامر التحكم بالفرز (/stop و /on) ====================
+@app.on_message(filters.command("stop") & filters.user(OWNER_IDS))
+async def stop_sorting_handler(client: Client, message: Message):
+    global ulp_sorting_active
+    ulp_sorting_active = False
+    await message.reply("🛑 تم إيقاف ميزة فرز ملفات ULP بنجاح.")
+
+@app.on_message(filters.command("on") & filters.user(OWNER_IDS))
+async def on_sorting_handler(client: Client, message: Message):
+    global ulp_sorting_active
+    ulp_sorting_active = True
+    await message.reply("✅ تم تفعيل ميزة فرز ملفات ULP بنجاح.")
+
 # ==================== أزرار المستخدمين والوظائف ====================
 @app.on_message(filters.regex("^💰 رصيدي ونقاطي$"))
 async def check_balance(client: Client, message: Message):
@@ -901,7 +914,8 @@ async def ask_upload_ulp(client: Client, message: Message):
 
 @app.on_message(filters.regex("^📂 فرز ملفات ULP$") & filters.user(OWNER_IDS))
 async def ask_sort_ulp(client: Client, message: Message):
-    await message.reply("📂 ميزة فرز ملفات ULP مفعلة وجاهزة للاستخدام.")
+    status_text = "مفعلة ✅" if ulp_sorting_active else "متوقفة 🛑"
+    await message.reply(f"📂 ميزة فرز ملفات ULP حالياً: <b>{status_text}</b>\nيمكنك التحكم بها عبر الأوامر:\n• `/on` لتفعيل الفرز\n• `/stop` لإيقاف الفرز")
 
 @app.on_message(filters.regex("^📊 الإحصائيات الشاملة$") & filters.user(OWNER_IDS))
 async def show_full_stats(client: Client, message: Message):
@@ -1039,18 +1053,24 @@ async def handle_document_upload(client: Client, message: Message):
     user_id = message.from_user.id
     if user_action_state.get(user_id) == "awaiting_ulp_file":
         user_action_state.pop(user_id, None)
-        msg = await message.reply("📥 جاري تحميل ومعالجة الملف...")
+        
+        # التحقق من حالة الفرز عبر الأوامر (/stop و /on)
+        if not ulp_sorting_active:
+            await message.reply("🛑 ميزة فرز ملفات ULP متوقفة حالياً (تم إيقافها بواسطة أمر `/stop`). قم بتفعيلها باستخدام `/on` أولاً لإتمام رفع الملف.")
+            return
+
+        msg = await message.reply("📥 جاري تحميل ومعالجة الملف (مع تفعيل الفرز)...")
         file_path = await message.download(file_name="/tmp/")
         try:
             added = await asyncio.to_thread(add_combos_from_file, file_path)
-            await msg.edit_text(f"✅ تم رفع وإضافة عدد <b>{added:,}</b> سطر بنجاح لقاعدة البيانات!")
+            await msg.edit_text(f"✅ تم رفع وإضافة عدد <b>{added:,}</b> سطر بنجاح لقاعدة البيانات (بواسطة نظام الفرز المُفعل)!")
         except Exception as e:
             await msg.edit_text(f"❌ حدث خطأ أثناء المعالجة: {e}")
         finally:
             if os.path.exists(file_path):
                 os.remove(file_path)
 
-@app.on_message(filters.text & ~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺|💎|📋|👥|📂)"))
+@app.on_message(filters.text & ~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺|💎|📋|👥|📂|/stop|/on)"))
 async def process_text_inputs(client: Client, message: Message):
     user_id = message.from_user.id
     text_input = message.text.strip()
@@ -1228,5 +1248,5 @@ async def callback_get_combos(client: Client, callback: CallbackQuery):
     except Exception: pass
 
 if __name__ == "__main__":
-    print("🚀 Bot is running completely with full original panel buttons and requested features!")
+    print("🚀 Bot is running completely with all features including /stop and /on commands for sorting!")
     app.run()
