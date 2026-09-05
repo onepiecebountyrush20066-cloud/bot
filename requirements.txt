@@ -1,2 +1,6 @@
 pyrogram==2.0.106
 tgcrypto
+pyrogram==2.0.106
+tgcrypto
+requests
+beautifulsoup4
