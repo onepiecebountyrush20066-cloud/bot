@@ -50,6 +50,7 @@ CHECKER_PROXY_PATH = os.path.join(WORK_DIR, "checker_proxies.txt")
 os.makedirs(CHECKER_FILES_DIR, exist_ok=True)
 
 bot_enabled_for_users = True
+ulp_feature_enabled = True
 user_action_state = {}
 user_filter_keywords = {}
 subscription_cache = {}
@@ -75,7 +76,14 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, points REAL DEFAULT 0, referred_by INTEGER DEFAULT NULL, is_blocked INTEGER DEFAULT 0, ban_reason TEXT DEFAULT NULL, total_withdrawals INTEGER DEFAULT 0, last_daily_claim TEXT DEFAULT NULL, streak_count INTEGER DEFAULT 0, level TEXT DEFAULT 'عادي', created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
     for col in ["ban_reason", "total_withdrawals", "last_daily_claim", "streak_count", "level", "created_at"]:
         try:
-            cursor.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT NULL" if col in ["ban_reason", "last_daily_claim", "created_at"] else f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0" if col == "total_withdrawals" else f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT 'عادي'" if col == "level" else f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+            if col in ["ban_reason", "last_daily_claim", "created_at"]:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT NULL")
+            elif col == "total_withdrawals":
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+            elif col == "level":
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT 'عادي'")
+            else:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
         except:
             pass
     cursor.execute('''CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, domain TEXT NOT NULL, amount INTEGER NOT NULL, points_spent REAL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
@@ -450,7 +458,7 @@ async def update_counter_message(client: Client, chat_id: int):
                     counter_message_id = msg.id
         except:
             pass
-        await asyncio.sleep(60)  # تحديث كل دقيقة
+        await asyncio.sleep(60)
 
 async def run_checker(client: Client, chat_id: int):
     global checker_active, counter_message_id
@@ -509,10 +517,14 @@ async def run_checker(client: Client, chat_id: int):
     
     batch_size = 15
     for batch_idx in range(0, len(accounts), batch_size):
+        if not checker_active:
+            break
         batch = accounts[batch_idx:batch_idx + batch_size]
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {executor.submit(process_single_account_checker, email, pwd): (email, pwd) for email, pwd in batch}
             for future in as_completed(futures):
+                if not checker_active:
+                    break
                 try:
                     result = future.result(timeout=60)
                     with checker_results_lock:
@@ -673,6 +685,7 @@ async def stop_checker_cb(client: Client, callback: CallbackQuery):
     await callback.answer("تم إيقاف الفحص")
     await callback.message.edit_text("⏹ تم إيقاف الفحص")
 
+# ==================== معالجة ملفات الفحص ====================
 @app.on_message(filters.document & filters.user(OWNER_IDS))
 async def handle_files(client: Client, message: Message):
     user_id = message.from_user.id
@@ -712,6 +725,7 @@ async def handle_files(client: Client, message: Message):
             await message.reply(f"❌ خطأ: {e}")
         return
     
+    # ULP رفع ملف
     if state == "awaiting_ulp_upload":
         user_action_state.pop(user_id, None)
         temp_path = None
@@ -720,6 +734,43 @@ async def handle_files(client: Client, message: Message):
             temp_path = await message.download()
             added = await asyncio.to_thread(add_combos_from_file, temp_path)
             await msg.edit_text(f"✅ تمت الإضافة: <b>{added:,}</b>")
+        except Exception as e:
+            await message.reply(f"❌ خطأ: {e}")
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+        return
+    
+    # ULP فرز ملف
+    if state == "awaiting_ulp_file":
+        user_action_state.pop(user_id, None)
+        keywords = user_filter_keywords.pop(user_id, [])
+        temp_path = None
+        try:
+            msg = await message.reply("⏳ جاري الفرز...")
+            temp_path = await message.download()
+            
+            filtered = []
+            seen = set()
+            for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']:
+                try:
+                    with open(temp_path, 'r', encoding=enc, errors='ignore') as f:
+                        for line in f:
+                            line_str = line.strip()
+                            if line_str and any(k in line_str.lower() for k in keywords) and line_str not in seen:
+                                seen.add(line_str)
+                                filtered.append(line_str)
+                    break
+                except:
+                    continue
+            
+            if filtered:
+                output = io.BytesIO("\n".join(filtered).encode("utf-8"))
+                output.name = f"filtered_{len(filtered)}.txt"
+                await client.send_document(message.chat.id, output, caption=f"✅ {len(filtered):,} سطر")
+            else:
+                await message.reply("❌ لا توجد نتائج")
+            await msg.delete()
         except Exception as e:
             await message.reply(f"❌ خطأ: {e}")
         finally:
@@ -812,46 +863,6 @@ async def process_text(client: Client, message: Message):
         user_action_state[user_id] = "awaiting_ulp_file"
         await message.reply("✅ أرسل ملف ULP الآن")
         return
-
-@app.on_message(filters.document & filters.user(OWNER_IDS))
-async def handle_ulp_filter_file(client: Client, message: Message):
-    user_id = message.from_user.id
-    state = user_action_state.get(user_id)
-    
-    if state == "awaiting_ulp_file":
-        user_action_state.pop(user_id, None)
-        keywords = user_filter_keywords.pop(user_id, [])
-        temp_path = None
-        try:
-            msg = await message.reply("⏳ جاري الفرز...")
-            temp_path = await message.download()
-            
-            filtered = []
-            seen = set()
-            for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']:
-                try:
-                    with open(temp_path, 'r', encoding=enc, errors='ignore') as f:
-                        for line in f:
-                            line_str = line.strip()
-                            if line_str and any(k in line_str.lower() for k in keywords) and line_str not in seen:
-                                seen.add(line_str)
-                                filtered.append(line_str)
-                    break
-                except:
-                    continue
-            
-            if filtered:
-                output = io.BytesIO("\n".join(filtered).encode("utf-8"))
-                output.name = f"filtered_{len(filtered)}.txt"
-                await client.send_document(message.chat.id, output, caption=f"✅ {len(filtered):,} سطر")
-            else:
-                await message.reply("❌ لا توجد نتائج")
-            await msg.delete()
-        except Exception as e:
-            await message.reply(f"❌ خطأ: {e}")
-        finally:
-            if temp_path and os.path.exists(temp_path):
-                os.remove(temp_path)
 
 # ==================== أزرار الأعضاء ====================
 @app.on_message(filters.regex("^💰 رصيدي ونقاطي$"))
