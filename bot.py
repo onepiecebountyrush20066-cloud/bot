@@ -44,7 +44,7 @@ MAX_FILE_SIZE = 1024 * 1024 * 1024
 DEFAULT_DEST = OWNER_IDS[0] if OWNER_IDS else None
 
 BACKFILL_ENABLED = os.getenv("BACKFILL_ENABLED", "1") == "1"
-BACKFILL_LIMIT = int(os.getenv("BACKFILL_LIMIT", "50000"))
+BACKFILL_LIMIT = int(os.getenv("BACKFILL_LIMIT", "1000000"))
 
 NETWORK_RETRY_DELAY = 10
 DOWNLOAD_ATTEMPTS = 5
@@ -52,7 +52,7 @@ PAUSE_BETWEEN_FILES = 2.0
 PAUSE_BETWEEN_CHUNKS = 15.0
 
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5000"))
-FLUSH_INTERVAL = int(os.getenv("FLUSH_INTERVAL", "3600"))  # ثانية
+FLUSH_INTERVAL = int(os.getenv("FLUSH_INTERVAL", "3600"))
 
 ULP_PATTERNS = [
     re.compile(r"repost\s*from", re.IGNORECASE),
@@ -65,30 +65,81 @@ BUTTON_TEXTS = {
     "✅ تفعيل", "🚫 إغلاق", "💰 رصيدي", "📋 آخر العمليات",
 }
 
-# ==================== الحالة العامة (RAM فقط) ====================
+# ==================== الحالة العامة (RAM) ====================
 _monitor_chat_id_cache = None
 _monitor_chat_obj = None
 _userbot_ready = False
 _backfill_running = False
 _bot_running = False
 
-# قائمة الحسابات المتراكمة في RAM
 _pending_lock = asyncio.Lock()
-_pending_list = []          # list of str
-_batch_num = 0              # عدّاد الدفعات
+_pending_list = []
+_batch_num = 0
 
-# قائمة الكومبوهات للبحث (RAM فقط، محدودة)
 _combos_lock = asyncio.Lock()
 _combos_set = set()
-COMBOS_MAX = int(os.getenv("COMBOS_MAX", "200000"))  # حد أقصى لتجنب استهلاك RAM
+COMBOS_MAX = int(os.getenv("COMBOS_MAX", "200000"))
 
-# منع تكرار الملفات المعالجة (RAM، محدود)
 _processed_lock = asyncio.Lock()
 _processed_set = OrderedDict()
-PROCESSED_MAX = 5000
 
-# حالة المستخدمين
-user_action_state = {}
+# ==================== ملف قائمة المعالجة على القرص ====================
+PROCESSED_FILE = os.getenv("PROCESSED_FILE", "/data/processed.txt")
+PROCESSED_DIR = os.path.dirname(PROCESSED_FILE)
+if PROCESSED_DIR:
+    try:
+        os.makedirs(PROCESSED_DIR, exist_ok=True)
+    except Exception as e:
+        print(f"[PROCESSED DIR] {e}")
+
+def _load_processed_from_disk():
+    if not os.path.exists(PROCESSED_FILE):
+        print(f"[PROCESSED] لا يوجد ملف سابق في {PROCESSED_FILE}")
+        return
+    try:
+        count = 0
+        with open(PROCESSED_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                key = line.strip()
+                if key:
+                    _processed_set[key] = True
+                    count += 1
+        print(f"[PROCESSED] ✅ تم تحميل {count:,} معرف من القرص")
+    except Exception as e:
+        print(f"[PROCESSED LOAD ERROR] {e}")
+
+def _append_processed_to_disk(key):
+    try:
+        with open(PROCESSED_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{key}\n")
+    except Exception as e:
+        print(f"[PROCESSED APPEND ERROR] {e}")
+
+async def is_already_processed(identifier):
+    async with _processed_lock:
+        return str(identifier) in _processed_set
+
+async def mark_as_processed(identifier):
+    async with _processed_lock:
+        key = str(identifier)
+        if key in _processed_set:
+            return
+        _processed_set[key] = True
+        await asyncio.to_thread(_append_processed_to_disk, key)
+
+async def reset_processed():
+    async with _processed_lock:
+        count = len(_processed_set)
+        _processed_set.clear()
+        try:
+            if os.path.exists(PROCESSED_FILE):
+                os.remove(PROCESSED_FILE)
+        except Exception as e:
+            print(f"[RESET ERROR] {e}")
+        return count
+
+# تحميل فوري عند الإقلاع
+_load_processed_from_disk()
 
 # ==================== إعدادات ثابتة في RAM ====================
 _settings = {
@@ -113,9 +164,8 @@ def is_monitor_enabled():
 def get_monitor_domain():
     return _settings.get("monitor_domain", "").strip().lower()
 
-# ==================== إدارة قائمة الانتظار (RAM) ====================
+# ==================== قائمة الانتظار (RAM) ====================
 async def pending_add(accounts):
-    """إضافة حسابات للقائمة. ترجع عدد المضاف."""
     if not accounts:
         return 0
     async with _pending_lock:
@@ -138,7 +188,7 @@ async def pending_clear():
     async with _pending_lock:
         _pending_list.clear()
 
-# ==================== إدارة الكومبوهات (RAM للبحث) ====================
+# ==================== كومبوهات البحث (RAM) ====================
 async def combos_add(lines):
     if not lines:
         return 0
@@ -148,7 +198,6 @@ async def combos_add(lines):
             l = l.strip()
             if l and l not in _combos_set:
                 if len(_combos_set) >= COMBOS_MAX:
-                    # احذف أقدم عنصر لإفساح المجال
                     try:
                         _combos_set.pop()
                     except Exception:
@@ -176,21 +225,6 @@ async def combos_count(domain=None):
             return len(_combos_set)
         d = domain.lower()
         return sum(1 for c in _combos_set if d in c.lower())
-
-# ==================== منع التكرار ====================
-async def is_already_processed(identifier):
-    async with _processed_lock:
-        return str(identifier) in _processed_set
-
-async def mark_as_processed(identifier):
-    async with _processed_lock:
-        key = str(identifier)
-        if key in _processed_set:
-            _processed_set.move_to_end(key)
-            return
-        _processed_set[key] = True
-        if len(_processed_set) > PROCESSED_MAX:
-            _processed_set.popitem(last=False)
 
 # ==================== دوال مساعدة ====================
 def extract_email_pass(line: str) -> str:
@@ -382,6 +416,7 @@ def monitor_inline():
 
     buffer_size = pending_count()
     combos_size = len(_combos_set)
+    processed_size = len(_processed_set)
 
     text = (
         f"👁 <b>لوحة المراقبة</b>\n\n"
@@ -391,11 +426,11 @@ def monitor_inline():
         f"<b>دومين الفرز:</b> <code>{dom}</code>\n"
         f"<b>الوجهة:</b> أنت (<code>{DEFAULT_DEST}</code>)\n"
         f"<b>المسح التاريخي:</b> {backfill_status}\n\n"
-        f"📦 <b>البيانات في RAM:</b>\n"
-        f"<b>الحسابات المتراكمة:</b> <code>{buffer_size:,}</code> / {BATCH_SIZE:,}\n"
-        f"<b>كومبوهات للبحث:</b> <code>{combos_size:,}</code>\n"
+        f"📦 <b>البيانات:</b>\n"
+        f"<b>الحسابات المتراكمة (RAM):</b> <code>{buffer_size:,}</code> / {BATCH_SIZE:,}\n"
+        f"<b>كومبوهات للبحث (RAM):</b> <code>{combos_size:,}</code>\n"
         f"<b>الدفعات المُرسَلة:</b> <code>{_batch_num}</code>\n"
-        f"<b>ملاحظة:</b> لا يوجد تخزين على القرص ✅"
+        f"<b>📋 ملفات معالجة (قرص):</b> <code>{processed_size:,}</code>"
     )
 
     buttons = [
@@ -408,6 +443,7 @@ def monitor_inline():
          InlineKeyboardButton("❌ إزالة الدومين", callback_data="mon_clear_domain")],
         [InlineKeyboardButton(f"📤 سحب الكل ({buffer_size:,})", callback_data="mon_flush_auto")],
         [InlineKeyboardButton("🗑 حذف المتراكم", callback_data="mon_clear_buffer")],
+        [InlineKeyboardButton(f"🗑 تصفير قائمة المعالجة ({processed_size:,})", callback_data="mon_reset_processed")],
         [InlineKeyboardButton("🔄 إعادة الاتصال بالقناة", callback_data="mon_reconnect")],
         [InlineKeyboardButton("🔄 تحديث", callback_data="mon_refresh"),
          InlineKeyboardButton("⬅️ رجوع", callback_data="menu_home")],
@@ -417,12 +453,14 @@ def monitor_inline():
 def stats_inline():
     total_combos = len(_combos_set)
     pending = pending_count()
+    processed = len(_processed_set)
 
     text = (
         f"📊 <b>إحصائيات البوت</b>\n\n"
         f"<b>كومبوهات في RAM:</b> <code>{total_combos:,}</code>\n"
         f"<b>إجمالي العمليات:</b> <code>{get_total_operations():,}</code>\n"
         f"<b>📦 الحسابات المتراكمة:</b> <code>{pending:,}</code> / {BATCH_SIZE:,}\n"
+        f"<b>📋 ملفات معالجة:</b> <code>{processed:,}</code>\n"
         f"<b>الدفعات المُرسَلة:</b> <code>{_batch_num}</code>\n"
     )
     buttons = [
@@ -433,7 +471,6 @@ def stats_inline():
 
 # ==================== الإرسال التلقائي ====================
 async def _flush_pending(reason="auto"):
-    """يرسل كل الحسابات المتراكمة كملف واحد، ثم يفرّغ القائمة."""
     global _batch_num
 
     async with _pending_lock:
@@ -464,7 +501,6 @@ async def _flush_pending(reason="auto"):
         )
         print(f"[FLUSH] ✅ تم رفع {count} حساب (دفعة #{_batch_num})")
 
-        # فقط بعد نجاح الإرسال نحذف
         async with _pending_lock:
             del _pending_list[:count]
 
@@ -475,7 +511,6 @@ async def _flush_pending(reason="auto"):
         raise
 
 async def _check_and_flush():
-    """يُستدعى بعد كل إضافة. إذا وصل 5000 → أرسل."""
     if pending_count() >= BATCH_SIZE:
         try:
             await _flush_pending(reason=f"وصل {BATCH_SIZE}")
@@ -483,7 +518,6 @@ async def _check_and_flush():
             print(f"[AUTO FLUSH ERROR] {e}")
 
 async def _auto_flush_loop():
-    """كل ساعة، أرسل ما تبقى."""
     while True:
         try:
             await asyncio.sleep(FLUSH_INTERVAL)
@@ -563,12 +597,10 @@ async def _process_monitored_document(client: Client, message: Message):
                     lines = [l.strip() for l in f if l.strip()]
                 if lines:
                     added = await pending_add(lines)
-                    # نضيف أيضاً لقائمة البحث في RAM
                     await combos_add(lines)
                     current = pending_count()
                     print(f"[PENDING] +{added} جديد | الإجمالي: {current}/{BATCH_SIZE}")
 
-                    # ✅ فحص الإرسال التلقائي
                     await _check_and_flush()
             except Exception as e:
                 print(f"[PENDING ERROR] {e}")
@@ -792,7 +824,7 @@ async def kb_status(client: Client, message: Message):
         f"<b>المسح:</b> {'⏳ جارٍ' if _backfill_running else '✅ جاهز'}\n"
         f"<b>القناة:</b> <code>{_monitor_chat_id_cache or get_setting('saved_channel_id', '') or '—'}</code>\n"
         f"<b>📦 المتراكم:</b> <code>{pending_count():,}</code> / {BATCH_SIZE:,}\n"
-        f"<b>💾 التخزين:</b> RAM فقط"
+        f"<b>📋 معرفات معالجة:</b> <code>{len(_processed_set):,}</code>"
     )
     await message.reply(text)
 
@@ -820,8 +852,7 @@ async def kb_upload(client: Client, message: Message):
 
 @app.on_message(filters.regex(r"^📂 فرز ULP$") & filters.user(OWNER_IDS))
 async def kb_filter(client: Client, message: Message):
-    user_action_state[message.from_user.id] = "awaiting_filter_keywords"
-    await message.reply("📂 أرسل الكلمات المفتاحية:")
+    await message.reply("⚠️ فرز الكلمات غير مفعّل حالياً (بدون تخزين).")
 
 @app.on_message(filters.regex(r"^🎁 هدية$") & filters.user(OWNER_IDS))
 async def kb_gift(client: Client, message: Message):
@@ -851,11 +882,6 @@ async def handle_text_states(client: Client, message: Message):
                 user_action_state[user_id] = "awaiting_search_domain"
                 return
             await _do_search(client, message, text)
-
-        elif state == "awaiting_filter_keywords":
-            # غير مستخدم حالياً بدون DB
-            user_action_state.pop(user_id, None)
-            await message.reply("⚠️ فرز الكلمات غير مفعّل حالياً.")
 
         elif state == "awaiting_monitor_domain":
             user_action_state.pop(user_id, None)
@@ -1040,6 +1066,27 @@ async def on_callback(client: Client, callback: CallbackQuery):
             await _safe_edit(callback, text, kb)
             await callback.answer(f"🗑 تم حذف {size:,}")
 
+        elif data == "mon_reset_processed":
+            count = len(_processed_set)
+            await _safe_edit(
+                callback,
+                f"⚠️ <b>تصفير قائمة المعالجة</b>\n\n"
+                f"عدد المعرفات الحالية: <code>{count:,}</code>\n\n"
+                f"بعد التصفير، أي مسح تاريخي جديد راح <b>يعيد تنزيل كل الملفات</b> من الصفر.\n\n"
+                f"هل أنت متأكد؟",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚠️ نعم، صفّر", callback_data="mon_reset_processed_confirm")],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data="menu_monitor")],
+                ])
+            )
+
+        elif data == "mon_reset_processed_confirm":
+            await callback.answer()
+            count = await reset_processed()
+            text, kb = monitor_inline()
+            await _safe_edit(callback, text, kb)
+            await callback.answer(f"🗑 تم حذف {count:,} معرف")
+
         elif data == "mon_reconnect":
             await callback.answer("🔄")
             if userbot is None:
@@ -1168,10 +1215,30 @@ async def cmd_flush(client: Client, message: Message):
 @app.on_message(filters.command("pending") & filters.user(OWNER_IDS))
 async def cmd_pending(client: Client, message: Message):
     await message.reply(
-        f"📦 <b>RAM</b>\n\n"
-        f"<b>الحسابات:</b> <code>{pending_count():,}</code> / {BATCH_SIZE:,}\n"
-        f"<b>كومبوهات البحث:</b> <code>{len(_combos_set):,}</code>\n"
-        f"<b>الدفعات:</b> <code>{_batch_num}</code>"
+        f"📦 <b>حالة الذاكرة والقرص</b>\n\n"
+        f"<b>💾 على القرص (ملف صغير):</b>\n"
+        f"• معرفات معالجة: <code>{len(_processed_set):,}</code>\n\n"
+        f"<b>🧠 في RAM:</b>\n"
+        f"• الحسابات المتراكمة: <code>{pending_count():,}</code> / {BATCH_SIZE:,}\n"
+        f"• كومبوهات البحث: <code>{len(_combos_set):,}</code>\n"
+        f"• الدفعات المُرسَلة: <code>{_batch_num}</code>"
+    )
+
+@app.on_message(filters.command("reset_processed") & filters.user(OWNER_IDS))
+async def cmd_reset_processed(client: Client, message: Message):
+    count = len(_processed_set)
+    if count == 0:
+        await message.reply("📭 قائمة المعالجة فارغة أصلاً.")
+        return
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"⚠️ نعم احذف {count:,}", callback_data="mon_reset_processed_confirm")],
+        [InlineKeyboardButton("❌ إلغاء", callback_data="menu_monitor")],
+    ])
+    await message.reply(
+        f"⚠️ <b>تصفير قائمة المعالجة</b>\n\n"
+        f"عدد المعرفات: <code>{count:,}</code>\n"
+        f"سيُعاد تنزيل كل الملفات من الصفر بعد التصفير.",
+        reply_markup=kb
     )
 
 @app.on_message(filters.command("debug_chat") & filters.user(OWNER_IDS))
@@ -1183,7 +1250,9 @@ async def cmd_debug_chat(client: Client, message: Message):
     lines.append(f"cache: <code>{_monitor_chat_id_cache}</code>")
     lines.append(f"saved_id: <code>{get_setting('saved_channel_id', '')}</code>")
     lines.append(f"pending: <code>{pending_count():,}</code>")
+    lines.append(f"processed: <code>{len(_processed_set):,}</code>")
     lines.append(f"batch_num: <code>{_batch_num}</code>")
+    lines.append(f"file: <code>{PROCESSED_FILE}</code>")
     await message.reply("\n".join(lines))
 
 # ==================== نقطة التشغيل ====================
@@ -1195,6 +1264,9 @@ async def _async_main():
     print("=" * 60)
     print(f"📦 BATCH_SIZE = {BATCH_SIZE}")
     print(f"⏱ FLUSH_INTERVAL = {FLUSH_INTERVAL}s")
+    print(f"📚 BACKFILL_LIMIT = {BACKFILL_LIMIT}")
+    print(f"💾 PROCESSED_FILE = {PROCESSED_FILE}")
+    print(f"📋 معرفات محمّلة: {len(_processed_set):,}")
     print("=" * 60)
 
     if userbot is not None:
@@ -1212,7 +1284,6 @@ async def _async_main():
     print("🤖 Bot online")
     print("=" * 60)
 
-    # شغّل timer الإرسال الدوري
     asyncio.create_task(_auto_flush_loop())
 
     stop = asyncio.Event()
